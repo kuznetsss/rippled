@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.9.8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>rippled: External Conan recipes</title>
+<title>rippled: API Version 3</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -69,16 +69,31 @@ $(function() {
 
 </div><!-- top -->
 <div><div class="header">
-  <div class="headertitle"><div class="title">External Conan recipes</div></div>
+  <div class="headertitle"><div class="title">API Version 3</div></div>
 </div><!--header-->
 <div class="contents">
-<div class="textblock"><p><a class="anchor" id="autotoc_md206"></a> The subdirectories in this directory contain external libraries used by rippled.</p>
-<table class="markdownTable">
-<tr class="markdownTableHead">
-<th class="markdownTableHeadLeft">Folder   </th><th class="markdownTableHeadLeft">Upstream   </th><th class="markdownTableHeadLeft">Description    </th></tr>
-<tr class="markdownTableRowOdd">
-<td class="markdownTableBodyLeft"><code>antithesis-sdk</code>   </td><td class="markdownTableBodyLeft"><a href="https://github.com/antithesishq/antithesis-sdk-cpp/">Project</a>   </td><td class="markdownTableBodyLeft"><a href="https://antithesis.com/docs/using_antithesis/sdk/cpp/overview.html">Antithesis</a> SDK for C++   </td></tr>
-</table>
+<div class="textblock"><p><a class="anchor" id="autotoc_md38"></a> API version 3 is currently a <b>beta API</b>. It requires enabling <code>[beta_rpc_api]</code> in the rippled configuration to use. To use this API, clients specify <code>"api_version" : 3</code> in each request.</p>
+<p>For info about how <a href="https://xrpl.org/request-formatting.html#api-versioning">API versioning</a> works, including examples, please view the <a href="https://github.com/XRPLF/XRPL-Standards/discussions/54">XLS-22d spec</a>. For details about the implementation of API versioning, view the <a href="https://github.com/XRPLF/rippled/pull/3155">implementation PR</a>. API versioning ensures existing integrations and users continue to receive existing behavior, while those that request a higher API version will experience new behavior.</p>
+<h1><a class="anchor" id="autotoc_md39"></a>
+Breaking Changes</h1>
+<h2><a class="anchor" id="autotoc_md40"></a>
+Modifications to &lt;tt&gt;amm_info&lt;/tt&gt;</h2>
+<p>The order of error checks has been changed to provide more specific error messages. (<a href="https://github.com/XRPLF/rippled/pull/4924">#4924</a>)</p>
+<ul>
+<li><b>Before (API v2)</b>: When sending an invalid account or asset to <code>amm_info</code> while other parameters are not set as expected, the method returns a generic <code>rpcINVALID_PARAMS</code> error.</li>
+<li><b>After (API v3)</b>: The same scenario returns a more specific error: <code>rpcISSUE_MALFORMED</code> for malformed assets or <code>rpcACT_MALFORMED</code> for malformed accounts.</li>
+</ul>
+<h2><a class="anchor" id="autotoc_md41"></a>
+Modifications to &lt;tt&gt;ledger_entry&lt;/tt&gt;</h2>
+<p>Added support for string shortcuts to look up fixed-location ledger entries using the <code>"index"</code> parameter. (<a href="https://github.com/XRPLF/rippled/pull/5644">#5644</a>)</p>
+<p>In API version 3, the following string values can be used with the <code>"index"</code> parameter:</p>
+<ul>
+<li><code>"index": "amendments"</code> - Returns the <code>Amendments</code> ledger entry</li>
+<li><code>"index": "fee"</code> - Returns the <code>FeeSettings</code> ledger entry</li>
+<li><code>"index": "nunl"</code> - Returns the <code>NegativeUNL</code> ledger entry</li>
+<li><code>"index": "hashes"</code> - Returns the "short" <code>LedgerHashes</code> ledger entry (recent ledger hashes)</li>
+</ul>
+<p>These shortcuts are only available in API version 3 and later. In API versions 1 and 2, these string values would result in an error. </p>
 </div></div><!-- contents -->
 </div><!-- PageDoc -->
 <!-- start footer part -->
