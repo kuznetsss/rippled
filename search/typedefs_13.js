@@ -26,7 +26,7 @@ var searchData=
   ['token_5fiter_23',['token_iter',['../classxrpl_1_1test_1_1AMMCalc__test.html#a5aa9de6e89608f98eedeac746dcf28f2',1,'xrpl::test::AMMCalc_test']]],
   ['tp_24',['tp',['../classxrpl_1_1test_1_1csf_1_1CollectorRef.html#a4fea875d9095af34563e5b3debf1507c',1,'xrpl::test::csf::CollectorRef']]],
   ['traits_5ftype_25',['traits_type',['../classbeast_1_1basic__logstream.html#aa650f62ec82b492b352e1cb72f5f1f74',1,'beast::basic_logstream']]],
-  ['trates_26',['trates',['../classxrpl_1_1test_1_1AMMCalc__test.html#a3699bf8c2b346a5c1c13f26449837b3e',1,'xrpl::test::AMMCalc_test']]],
+  ['transfer_5frates_26',['transfer_rates',['../classxrpl_1_1test_1_1AMMCalc__test.html#a5e91e4241ec3009cb3d416ab6673efb6',1,'xrpl::test::AMMCalc_test']]],
   ['treenodecache_27',['TreeNodeCache',['../namespacexrpl.html#abd161ba39f2c7297793fc378ead1bfbe',1,'xrpl']]],
   ['trustset_28',['TrustSet',['../namespacexrpl.html#a5fef8ac0489a3d61a1e3f1629a6a9d09',1,'xrpl']]],
   ['tsignedattestation_29',['tsignedattestation',['../structxrpl_1_1XChainClaimAttestation.html#a36280cbf194aface26a5541e7b7d307f',1,'xrpl::XChainClaimAttestation::TSignedAttestation'],['../structxrpl_1_1XChainCreateAccountAttestation.html#a5d283022619497d60865f04c7ed2a1d4',1,'xrpl::XChainCreateAccountAttestation::TSignedAttestation']]],
