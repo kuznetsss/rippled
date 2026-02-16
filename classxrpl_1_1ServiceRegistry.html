@@ -187,6 +187,11 @@ Public Member Functions</h2></td></tr>
 <tr class="separator:a891047d588b6917f6acb2adc6f84cb09"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a158b199072841deec342b10bf980248f" id="r_a158b199072841deec342b10bf980248f"><td class="memItemLeft" align="right" valign="top">virtual <a class="el" href="classxrpl_1_1Logs.html">Logs</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classxrpl_1_1ServiceRegistry.html#a158b199072841deec342b10bf980248f">logs</a> ()=0</td></tr>
 <tr class="separator:a158b199072841deec342b10bf980248f"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a6af191093f38eebb3228c286f2a33805" id="r_a6af191093f38eebb3228c286f2a33805"><td class="memItemLeft" align="right" valign="top">virtual <a class="elRef" href="http://en.cppreference.com/w/cpp/utility/optional.html">std::optional</a>&lt; <a class="el" href="namespacexrpl.html#a76c892803711595bd0d3cf6fbedf028a">uint256</a> &gt; const &amp;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classxrpl_1_1ServiceRegistry.html#a6af191093f38eebb3228c286f2a33805">trapTxID</a> () const =0</td></tr>
+<tr class="separator:a6af191093f38eebb3228c286f2a33805"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a95a17d5f8c19da17acc45118ee0a6a19" id="r_a95a17d5f8c19da17acc45118ee0a6a19"><td class="memItemLeft" align="right" valign="top">virtual <a class="el" href="classxrpl_1_1DatabaseCon.html">DatabaseCon</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classxrpl_1_1ServiceRegistry.html#a95a17d5f8c19da17acc45118ee0a6a19">getWalletDB</a> ()=0</td></tr>
+<tr class="memdesc:a95a17d5f8c19da17acc45118ee0a6a19"><td class="mdescLeft">&#160;</td><td class="mdescRight">Retrieve the "wallet database".  <br /></td></tr>
+<tr class="separator:a95a17d5f8c19da17acc45118ee0a6a19"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:af9324b9349626ba5ebe37b8784f61535" id="r_af9324b9349626ba5ebe37b8784f61535"><td class="memItemLeft" align="right" valign="top">virtual <a class="el" href="classxrpl_1_1Application.html">Application</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classxrpl_1_1ServiceRegistry.html#af9324b9349626ba5ebe37b8784f61535">app</a> ()=0</td></tr>
 <tr class="separator:af9324b9349626ba5ebe37b8784f61535"><td class="memSeparator" colspan="2">&#160;</td></tr>
 </table>
@@ -1380,6 +1385,62 @@ Public Member Functions</h2></td></tr>
 </div><div class="memdoc">
 
 <p>Implemented in <a class="el" href="classxrpl_1_1ApplicationImp.html#a7ee69c49b56bf687fbae951013d67b67">xrpl::ApplicationImp</a>.</p>
+
+</div>
+</div>
+<a id="a6af191093f38eebb3228c286f2a33805" name="a6af191093f38eebb3228c286f2a33805"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a6af191093f38eebb3228c286f2a33805">&#9670;&#160;</a></span>trapTxID()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual <a class="elRef" href="http://en.cppreference.com/w/cpp/utility/optional.html">std::optional</a>&lt; <a class="el" href="namespacexrpl.html#a76c892803711595bd0d3cf6fbedf028a">uint256</a> &gt; const  &amp; xrpl::ServiceRegistry::trapTxID </td>
+          <td>(</td>
+          <td class="paramname"></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Implemented in <a class="el" href="classxrpl_1_1ApplicationImp.html#a90ea9bfed89b0f932f0ec3971a647b52">xrpl::ApplicationImp</a>.</p>
+
+</div>
+</div>
+<a id="a95a17d5f8c19da17acc45118ee0a6a19" name="a95a17d5f8c19da17acc45118ee0a6a19"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a95a17d5f8c19da17acc45118ee0a6a19">&#9670;&#160;</a></span>getWalletDB()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual <a class="el" href="classxrpl_1_1DatabaseCon.html">DatabaseCon</a> &amp; xrpl::ServiceRegistry::getWalletDB </td>
+          <td>(</td>
+          <td class="paramname"></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Retrieve the "wallet database". </p>
+
+<p>Implemented in <a class="el" href="classxrpl_1_1ApplicationImp.html#aa3c1c854c0a1edcc3cf9840b3afc2d0f">xrpl::ApplicationImp</a>.</p>
 
 </div>
 </div>

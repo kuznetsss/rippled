@@ -11,7 +11,7 @@ var searchData=
   ['bips16_8',['Bips16',['../namespacexrpl.html#a8bef4d3702394107642542b23cea0ac4',1,'xrpl']]],
   ['bips32_9',['Bips32',['../namespacexrpl.html#a777553d242789ee054926a1e32ae2b56',1,'xrpl']]],
   ['blob_10',['blob',['../namespacexrpl.html#a9c45e3c454e975035b02eaee421bec30',1,'xrpl::Blob'],['../classxrpl_1_1SecretKey__test.html#ab9369169da175f806c17099e10e60481',1,'xrpl::SecretKey_test::blob'],['../classxrpl_1_1PublicKey__test.html#ab2db913c73effa08dff7cdbea3bf3747',1,'xrpl::PublicKey_test::blob']]],
-  ['booktolistenersmap_11',['BookToListenersMap',['../classxrpl_1_1OrderBookDB.html#adcff4ea90dfdd02aea495bc402fb3fc1',1,'xrpl::OrderBookDB']]],
+  ['booktolistenersmap_11',['BookToListenersMap',['../classxrpl_1_1OrderBookDBImpl.html#a625320983b07856a9e8192c69ad0f2d2',1,'xrpl::OrderBookDBImpl']]],
   ['bridgeid_12',['BridgeID',['../structxrpl_1_1test_1_1XChainSim__test.html#a135f0cb0af4043661ff9a2438185a305',1,'xrpl::test::XChainSim_test']]],
   ['bucket_5ftraits_13',['bucket_traits',['../classbeast_1_1detail_1_1aged__unordered__container.html#a57210aa1c39dfb309da0bf19ecd4958f',1,'beast::detail::aged_unordered_container']]],
   ['bucket_5ftype_14',['bucket_type',['../classbeast_1_1detail_1_1aged__unordered__container.html#a49beb554a9055bff389c6789036f9fff',1,'beast::detail::aged_unordered_container']]],

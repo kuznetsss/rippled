@@ -298,7 +298,7 @@ $(document).ready(function() { init_codefold(0); });
 <div class="line"><a id="l00203" name="l00203"></a><span class="lineno">  203</span>        aLedger = app.<a class="code hl_function" href="classxrpl_1_1ServiceRegistry.html#ac0ff05b3ec717acd48faea848271e8d0">getAcceptedLedgerCache</a>().fetch(ledger-&gt;header().hash);</div>
 <div class="line"><a id="l00204" name="l00204"></a><span class="lineno">  204</span>        <span class="keywordflow">if</span> (!aLedger)</div>
 <div class="line"><a id="l00205" name="l00205"></a><span class="lineno">  205</span>        {</div>
-<div class="line"><a id="l00206" name="l00206"></a><span class="lineno">  206</span>            aLedger = <a class="code hl_variableRef" href="http://en.cppreference.com/w/cpp/types/is_same.html">std::make_shared&lt;AcceptedLedger&gt;</a>(ledger, app);</div>
+<div class="line"><a id="l00206" name="l00206"></a><span class="lineno">  206</span>            aLedger = <a class="code hl_variableRef" href="http://en.cppreference.com/w/cpp/types/is_same.html">std::make_shared&lt;AcceptedLedger&gt;</a>(ledger);</div>
 <div class="line"><a id="l00207" name="l00207"></a><span class="lineno">  207</span>            app.<a class="code hl_function" href="classxrpl_1_1ServiceRegistry.html#ac0ff05b3ec717acd48faea848271e8d0">getAcceptedLedgerCache</a>().canonicalize_replace_client(ledger-&gt;header().hash, aLedger);</div>
 <div class="line"><a id="l00208" name="l00208"></a><span class="lineno">  208</span>        }</div>
 <div class="line"><a id="l00209" name="l00209"></a><span class="lineno">  209</span>    }</div>

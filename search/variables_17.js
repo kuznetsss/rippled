@@ -10,8 +10,8 @@ var searchData=
   ['xrp_5fdust_7',['xrp_dust',['../structxrpl_1_1test_1_1jtx_1_1XChainBridgeObjects.html#a0e663729414e5fcc469495584304982f',1,'xrpl::test::jtx::XChainBridgeObjects']]],
   ['xrp_5fledger_5fearliest_5ffees_8',['XRP_LEDGER_EARLIEST_FEES',['../namespacexrpl.html#a069506a534b113de2037c2bcaa40056a',1,'xrpl']]],
   ['xrp_5fledger_5fearliest_5fseq_9',['XRP_LEDGER_EARLIEST_SEQ',['../namespacexrpl.html#adbdbf906239fe40821419cda12a76d91',1,'xrpl']]],
-  ['xrpbooks_5f_10',['xrpBooks_',['../classxrpl_1_1OrderBookDB.html#a98b9a1ef2fc01b43ab292443cf6f4ebb',1,'xrpl::OrderBookDB']]],
-  ['xrpdomainbooks_5f_11',['xrpDomainBooks_',['../classxrpl_1_1OrderBookDB.html#a4ebc353fdbb08264a8be82eb6abb0cc4',1,'xrpl::OrderBookDB']]],
+  ['xrpbooks_5f_10',['xrpBooks_',['../classxrpl_1_1OrderBookDBImpl.html#a37c0906d04cb07cebe6615b2c6ce7c6d',1,'xrpl::OrderBookDBImpl']]],
+  ['xrpdomainbooks_5f_11',['xrpDomainBooks_',['../classxrpl_1_1OrderBookDBImpl.html#a5e306d2a52ac75361f71aee80966972f',1,'xrpl::OrderBookDBImpl']]],
   ['xrpholders_12',['xrpHolders',['../structxrpl_1_1test_1_1jtx_1_1MPTInit.html#af014c2b16b45a542a32675db41cedf68',1,'xrpl::test::jtx::MPTInit']]],
   ['xrptrustline_5f_13',['xrpTrustLine_',['../classxrpl_1_1NoXRPTrustLines.html#a9c7abdb69cc160480220261156c2ed2c',1,'xrpl::NoXRPTrustLines']]]
 ];
