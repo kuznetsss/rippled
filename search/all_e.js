@@ -678,7 +678,7 @@ var searchData=
   ['gotreplaydelta_675',['gotReplayDelta',['../classxrpl_1_1LedgerReplayer.html#a201d8f35657880f38a6270e824bd8f7e',1,'xrpl::LedgerReplayer']]],
   ['gotskiplist_676',['gotSkipList',['../classxrpl_1_1LedgerReplayer.html#a286b1e0bacf016caf756d6f3e6abc29e',1,'xrpl::LedgerReplayer']]],
   ['gotstaledata_677',['gotstaledata',['../classxrpl_1_1InboundLedgers.html#a0538e7f0389ea0a93d39e91ac4e4fd5f',1,'xrpl::InboundLedgers::gotStaleData()'],['../classxrpl_1_1InboundLedgersImp.html#ae8c7a4761504b36279a5d94c6c8f008f',1,'xrpl::InboundLedgersImp::gotStaleData()'],['../classxrpl_1_1test_1_1MagicInboundLedgers.html#afc754ac91dcd3cb362f23f899ba352c4',1,'xrpl::test::MagicInboundLedgers::gotStaleData()']]],
-  ['gottxset_678',['gottxset',['../classxrpl_1_1ApplicationImp.html#a9e50480cf82ca14f81820fbe14b353be',1,'xrpl::ApplicationImp::gotTXSet()'],['../classxrpl_1_1Consensus.html#a2b17098d297e76d36d51072e386658d8',1,'xrpl::Consensus::gotTxSet()'],['../classxrpl_1_1RCLConsensus.html#adee53e39ef828802cc2a69617e38ee93',1,'xrpl::RCLConsensus::gotTxSet()']]],
+  ['gottxset_678',['gottxset',['../classxrpl_1_1Consensus.html#a2b17098d297e76d36d51072e386658d8',1,'xrpl::Consensus::gotTxSet()'],['../classxrpl_1_1RCLConsensus.html#adee53e39ef828802cc2a69617e38ee93',1,'xrpl::RCLConsensus::gotTxSet()'],['../classxrpl_1_1ApplicationImp.html#a9e50480cf82ca14f81820fbe14b353be',1,'xrpl::ApplicationImp::gotTXSet()']]],
   ['gps_5fclock_679',['gps_clock',['http://en.cppreference.com/w/cpp/chrono/gps_clock.html',1,'std::chrono']]],
   ['gps_5fseconds_680',['gps_seconds',['http://en.cppreference.com/w/cpp/chrono/gps_clock.html',1,'std::chrono']]],
   ['gps_5ftime_681',['gps_time',['http://en.cppreference.com/w/cpp/chrono/gps_clock.html',1,'std::chrono']]],

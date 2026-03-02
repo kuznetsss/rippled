@@ -155,7 +155,7 @@ var searchData=
   ['iostream_152',['iostream',['http://en.cppreference.com/w/cpp/io/basic_iostream/basic_iostream.html',1,'std::iostream']]],
   ['iostream_5fcategory_153',['iostream_category',['http://en.cppreference.com/w/cpp/io/iostream_category.html',1,'std']]],
   ['iota_154',['iota',['http://en.cppreference.com/w/cpp/algorithm/iota.html',1,'std']]],
-  ['iou_155',['iou',['../classxrpl_1_1STAmount.html#a7e9a22dbe62e7677987b0eae8cc7dbcc',1,'xrpl::STAmount::iou()'],['../classxrpl_1_1test_1_1jtx_1_1IOU.html#a9c0f29cb339243e041f9ffe6c009dc52',1,'xrpl::test::jtx::IOU::IOU()']]],
+  ['iou_155',['iou',['../classxrpl_1_1test_1_1jtx_1_1IOU.html#a9c0f29cb339243e041f9ffe6c009dc52',1,'xrpl::test::jtx::IOU::IOU()'],['../classxrpl_1_1STAmount.html#a7e9a22dbe62e7677987b0eae8cc7dbcc',1,'xrpl::STAmount::iou()']]],
   ['iouamount_156',['iouamount',['../classxrpl_1_1IOUAmount.html#a57f34713168e43c64fbc0e70b8b083c3',1,'xrpl::IOUAmount::IOUAmount()=default'],['../classxrpl_1_1IOUAmount.html#a3158880e6e6a8a4640445467cd2e80dc',1,'xrpl::IOUAmount::IOUAmount(Number const &amp;other)'],['../classxrpl_1_1IOUAmount.html#a50562d6c8c255a5cdeca776d2f13231c',1,'xrpl::IOUAmount::IOUAmount(beast::Zero)'],['../classxrpl_1_1IOUAmount.html#a33a0737211daa59c7efebc2cdb2e9d6d',1,'xrpl::IOUAmount::IOUAmount(mantissa_type mantissa, exponent_type exponent)']]],
   ['ipaddressconversion_157',['IPAddressConversion',['../structbeast_1_1IPAddressConversion.html#aeeb741eceefb870c1c7ff31b894f1011',1,'beast::IPAddressConversion']]],
   ['ipallowed_158',['ipAllowed',['../namespacexrpl.html#a9242169db8356affa61b2028f8b7a283',1,'xrpl']]],
