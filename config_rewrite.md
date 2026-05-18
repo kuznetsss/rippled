@@ -11,7 +11,7 @@ Full replacement of the C++ config implementation with Rust. Rust owns parsing, 
 - **Single source of truth.** Config options are defined in one place. May be spread across nested structs, but each option lives in exactly one definition site.
 - **Self-documenting.** Each option carries documentation in code; a markdown reference is generated from the definitions (likely via a derive macro). Deferrable to a later step.
 - **Validators.** Each field can declare validators; after parsing, fields are validated and errors are reported. Likely macro-driven. Deferrable to a later step.
-- **INI and TOML support.** Currently only INI is supported, and parsing is lenient (unknown keys silently ignored). Both formats will be **strict** — unknown keys, wrong types, and malformed sections are errors. serde drives TOML; a custom serde INI deserializer handles INI (see edge cases below).
+- **INI and TOML support.** Currently only INI is supported, and parsing is lenient (unknown keys silently ignored). The rewrite supports both formats with **asymmetric strictness**: INI stays lenient (compat-first — existing rippled.cfg files load unchanged), TOML is strict (unknown keys, wrong types, malformed sections, and out-of-range values are errors). Both formats produce the same typed `ParsedConfig`. INI uses a two-stage parse (raw section bag → typed); TOML uses serde directly.
 
 ## Plan of plans
 
@@ -60,9 +60,9 @@ Full replacement of the C++ config implementation with Rust. Rust owns parsing, 
 
 - **Approach:** full replacement, not a parsing shim. Larger blast radius, accepted in exchange for a clean Rust-shaped interface.
 - **INI non-standard sections.** rippled's INI is not standard `key=value`; several sections are bare-line lists. Approach: implement a custom serde INI deserializer that understands the section shapes. Concrete strategy (two-stage parse vs. fully custom deserializer) is an open question to be resolved in step 2 (design).
-- **Strict parsing is a behavior change.** Accepted. Existing `rippled.cfg` files with typos / stale keys / commented experiments that boot today may be rejected.
+- **Asymmetric strict mode.** INI is **lenient by default** — replicates existing `BasicConfig` behavior, including silent-ignore of unknown keys / sections, silent clamps on the fields that already clamp today, and the existing per-field grammars. TOML is **strict by default** — unknown keys/sections, out-of-range values, and trailing-junk in custom grammars (e.g. `amendment_majority_time`) are errors. INI may be tightened later. See the analysis doc for the field-by-field rules.
 - **Migration tooling.** rippled will ship `--check-config` and `--convert-config` flags (INI → TOML, plus validation report) to ease the transition. These land in step 4.
-- **Fallback.** If the community pushes back on strict INI, relax it later. Strict is the default from day one.
+- **Fallback.** Both formats supported indefinitely. INI is the path of least resistance for existing operators; TOML is the recommended format for new deployments and gets the cleaner schema (table-of-tables for `[port.*]`, uniform path resolution, etc.).
 
 ## Out of scope (for now)
 

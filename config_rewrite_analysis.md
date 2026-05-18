@@ -4,6 +4,53 @@ Companion to `config_rewrite.md`. This is the output of step 1 of the rewrite pl
 
 Convention: file paths are repo-relative; line numbers are at the time of writing and may drift.
 
+## 0. Summary of decisions
+
+A condensed view of the decisions reached in §6 and §7 so step 2 (design) doesn't have to re-derive them. Each entry links back to the question that originated it.
+
+### Overall policy
+
+- **INI is lenient / compat-first by default.** Replicates existing `BasicConfig` behavior verbatim: silent-ignore of unknown keys and sections, per-field grammar rules unchanged, silent clamps preserved where they exist today. (§7 #10, §7 #11)
+- **TOML is strict by default.** Unknown keys, unknown sections, out-of-range values, and trailing-junk in custom grammars are parse errors. (§7 #11, §7 #12)
+- **Both formats produce the same typed `ParsedConfig`.** Schema is identical; only the surface grammar and strictness differ.
+
+### Grammar
+
+| Aspect | INI | TOML | Source |
+|---|---|---|---|
+| Booleans | `0\|1\|true\|false` case-insensitive | spec (`true\|false`) | §7 #1 |
+| Numbers | decimal only, optional leading `+` | spec (`0x`, `0o`, `0b`, `_` separators OK) | §7 #2 |
+| Durations | per-field grammar (existing) | per-field grammar; `amendment_majority_time` rejects trailing junk | §7 #3 + re-check |
+| Case-sensitivity | case-sensitive (matches existing impl) | case-sensitive (TOML spec) | §7 #4 |
+| Path resolution | piecemeal (3 fields auto-resolve) | uniform (all relative paths resolve against config dir) | §7 #5 + re-check |
+| Out-of-range numerics | silent clamp where existing impl clamps | error | §7 #10 |
+| Empty `key=` | reclassified as bare-value line (existing bug preserved) | rejected at TOML spec level | §6.11 |
+| `\#` escape | kept (existing) | n/a (TOML uses its own string escapes) | §6.10 |
+| Trailing comments (`# …`) | kept (existing) | n/a (TOML uses its own comment syntax) | §1.4 (no change needed) |
+
+### Structural
+
+- **Two types and a facade.** `ParsedConfig` (immutable, file-only) + `CliOverrides`/`ConfigOverrides` (mutable, post-parse) → `RuntimeConfig` (read facade: per-field accessor returns `cli.X.unwrap_or(parsed.X)`). (§7 #7, §7 #13)
+- **INI parse strategy.** Two-stage: raw section bag → typed sub-structs via per-section adapters. (§6.1)
+- **`[port_*]` layout.** INI flat (`[server]` + `[port_<name>]`). TOML table-of-tables (`server.ports = [...]` + `[port.<name>]`). (§7 #6)
+- **Stray `[port.<name>]`** (not in `server.ports`): error in TOML, ignored in INI. (§6.2)
+- **`[crawl]` dual shape.** INI accepts bare bool or kv map; TOML kv map only. (§6.1)
+- **Other section groups (`[node_db]`, `[validators]`, `[validator_keys]`, `[validator_list_*]`, etc.).** Flat top-level tables in both INI and TOML. No nested restructuring. (§6.12)
+- **`legacy()` accessor.** Retired. Every single-line section becomes a typed field on `ParsedConfig`. (§6.17)
+- **Lifted fields (`FAST_LOAD`, `USE_TX_TABLES_`).** Drop the lift; consumers migrate to typed sub-structs (`node_db.fast_load`, `ledger_tx_tables.use_tx_tables`). (§6.13)
+- **`[ips]` / `[ips_fixed]`.** Modeled as `Vec<HostPort>` with parsed values, not `Vec<String>` + post-pass regex. (§6.16)
+
+### Scope
+
+- **`kSIZED_ITEMS` and `NodeSize` auto-detection move to Rust.** The const table is exposed; `getValueFor` becomes an FFI call returning a primitive `int`. Auto-detection (RAM + CPU probe) runs in Rust via `sysinfo` / `available_parallelism` equivalents. (§7 #8)
+- **`validators.txt` is spliced into the main config**, matching existing behavior. Strict-mode overlap (same section in both files) is an error in TOML, silent append in INI. (§7 #9)
+- **Side effects:** Rust does anything that doesn't drag C++ types over the FFI — config file discovery via env vars, `mkdir -p` of the data dir, path absolutization, `validators.txt` ingest, `stderr` echo, cross-field validation, `NodeSize` detection. C++ keeps `HTTPClient::initializeSSLContext` and any other side effect that needs C++ class types. (§7 #14)
+- **`FORCE_MULTI_THREAD`** lives on `CliOverrides`. It is a real runtime field (read by `Application.cpp:329`) that no config file sets; tests populate it directly. (§7 #15)
+
+### Out-of-scope (deferred to step 2)
+
+The shape of `getValueFor` on the Rust side — flat table lookup vs. per-`SizedItem` typed method — is a step-2 design choice (§7 #8). Likewise the naming of `CliOverrides`/`ConfigOverrides` and exact FFI binding choices (cxx-rs vs. C ABI) are step-2 calls.
+
 ## 1. The shape of the existing types
 
 ### 1.1 `BasicConfig` and `Section`
@@ -137,7 +184,7 @@ These are written from `src/xrpld/app/main/Main.cpp` after `Config::setup` runs.
 
 ### 2.5 Fields used by tests only
 
-- `FORCE_MULTI_THREAD : bool = false` — written only from C++ tests; never read from config. Likely to stay a runtime-only switch, *not* a config field, in the Rust version.
+- `FORCE_MULTI_THREAD : bool = false` — never read from any config file; written only from C++ tests (`Coroutine_test.cpp:61,88`, `Transaction_ordering_test.cpp:67,105`). But *read* by production code in `Application.cpp:329` (job-queue sizing — in standalone mode, the queue uses 1 worker unless this flag is set). So it's a real runtime knob that lives outside the file, populated only via the override path.
 
 ### 2.6 Computed accessors
 
@@ -272,25 +319,39 @@ Sorted by how impactful they are to the Rust design.
 
 `[server]` is the canonical one (bare port names + shared kv defaults). `[crawl]` is dual-shape (single bare bool *or* kv map). `[transaction_queue]` only uses kv but had legacy single-line usage in older configs. **Open question:** how to express this in `serde`? A union with custom `Deserialize` per section is feasible but ugly. The two-stage approach (raw section bag → typed) keeps custom deserialization small. **Tentative recommendation:** keep the two-stage parse for INI; in TOML, define a canonical schema (`server.ports = ["peer", "rpc_admin"]` plus `[port_*]` tables) and let serde handle it directly.
 
+**Decision (INI strategy):** Two-stage parse. Stage 1 produces a raw section bag (`Vec<(name, Vec<line>)>`, close to today's `IniFileSections`). Stage 2 decodes each section into its typed sub-struct via per-section adapters. Dual-shape sections like `[server]` and `[crawl]` get small custom decoders rather than awkward `serde` `untagged` enums. Bare-line list sections (`[validators]`, `[features]`, `[ips]`, …) are decoded directly from their line vector. TOML uses the standard `serde` deserialization path.
+
+**Decision (`[crawl]`):** Accept both shapes in INI — single bare bool line *or* kv map — matching existing behavior. TOML accepts the kv-map form only (the bare-bool form has no clean TOML equivalent).
+
 ### 6.2 `[port_*]` is a *dynamic* set of sections
 
 Port names are user-chosen, only enumerated via `[server].values()`. **Open question:** how do unknown sections in strict mode interact with `[port_*]`? Proposal: validate against the union of (known top-level sections) ∪ (the names listed in `[server]`).
+
+**Decision:** TOML strict — every `[port.<name>]` table must have a matching entry in `server.ports = [...]`; an orphan table is a parse error. INI lenient — matches existing behavior: `[port_foo]` without a matching name in `[server]` is silently ignored (today `ServerHandler` only iterates the names listed in `[server].values()`, so orphans never get read). This is the natural consequence of the §7 #11 INI=lenient / TOML=strict split.
 
 ### 6.3 Three boolean parsing paths today (§1.3)
 
 The Rust rewrite collapses to one rule. **Tentative recommendation:** match the most permissive existing path (`beast::lexicalCastThrow<bool>`): accept `0`, `1`, `true`, `false`, case-insensitive. Reject everything else. This breaks any field that today happens to be set as `yes`/`no` and accidentally passed through `getIfExists<bool>` → int → bool with non-zero=true, but I could not find any user-facing examples.
 
+**Decision:** Resolved by §7 #1 — INI accepts `0|1|true|false` case-insensitive; TOML uses spec.
+
 ### 6.4 Numeric grammar
 
 Today's path is decimal-only via `std::from_chars`. Rust's `i64::from_str` matches that. **Open question:** do we want to accept human-friendly units (e.g. `64M`, `2GB`) in any place? Today nothing does. Recommend: no, keep strictly decimal. Cap and clamp behavior (e.g. `max_transactions` silently clamped) becomes an *explicit* validation rule with an error message rather than a silent clamp.
+
+**Decision:** Resolved by §7 #2 (numeric grammar — decimal only in INI; TOML follows spec) and §7 #10 (silent clamp kept in INI; error in TOML).
 
 ### 6.5 Duration grammar
 
 `[amendment_majority_time]` uses a custom regex `(\d+)\s*(minutes|hours|days|weeks)`. TOML has no native duration; INI tradition here is the same. Recommend: define a `Duration` type with one canonical grammar (`<int><space?><unit>`, units `minutes|hours|days|weeks|seconds`), and reuse it for `overlay.max_unknown_time` etc. (today those are bare integer seconds — slight expansion of the grammar, but backwards-compatible if integers without a unit are still seconds).
 
+**Decision:** Resolved by §7 #3 — per-field grammar, matching existing. No unified `Duration` type in INI.
+
 ### 6.6 Path-relative-to-config-file semantics
 
 Currently only `debug_logfile`, `validators_file`, and `database_path` are auto-resolved. `ssl_*` paths, `node_db.path`, `perf.perf_log`, `port_*.ssl_*` are *not* auto-resolved (user is expected to provide an absolute path). Recommend: pick one rule and apply uniformly, ideally "resolve relative to the config file". Make this explicit in the schema (a `RelPath` vs `Path` type, or a single `Path` type that always resolves).
+
+**Decision:** Resolved by §7 #5 — piecemeal, matching existing. Only `debug_logfile`, `validators_file`, `database_path` auto-resolve.
 
 ### 6.7 `validators.txt` is a nested INI
 
@@ -300,6 +361,8 @@ The current implementation parses a separate file and **splices** its sections i
 
 The second is cleaner but breaks existing consumers that look up `config.section("validators")` etc. Pick this when migrating consumers.
 
+**Decision:** Resolved by §7 #9 — splice model, matching existing.
+
 ### 6.8 Mutation after parsing
 
 The existing `Config` is mutated after `setup()` in two distinct ways:
@@ -308,41 +371,61 @@ The existing `Config` is mutated after `setup()` in two distinct ways:
 
 The first is internal bookkeeping (rewriting a parsed value to its absolute form) and is easy to absorb into the typed schema (just store the absolute path). The second is part of the public surface: the Rust API needs a builder/mutator path for CLI overrides. **Tentative recommendation:** parse the config file into an immutable `ParsedConfig`, then layer CLI overrides on top in a `RuntimeConfig` builder (CLI fields are a separate struct, joined at the end).
 
+**Decision:** Resolved by §7 #7 (ParsedConfig + CliOverrides → RuntimeConfig facade) and §7 #13 (resolved paths live on RuntimeConfig).
+
 ### 6.9 Section name case-sensitivity
 
 The example config (lines 64–66) documents identifiers as "not case sensitive". The implementation does not lowercase keys before lookup. Behavior diverges silently today: `[OVERLAY]` and `[overlay]` would be two distinct entries. **Open question:** match the documented "case-insensitive" rule (lowercase before lookup), or match the implementation (case-sensitive)? Recommend matching the documentation, since real configs almost certainly use lowercase already and the strict-mode rejection of stray-cased names would catch typos.
+
+**Decision:** Resolved by §7 #4 — case-sensitive, matching the existing implementation. Example-cfg documentation will be corrected to match.
 
 ### 6.10 `\#` escape
 
 The current escape rule (`\#` keeps `#` literal, *and* the `\` is removed) is unusual; YAML/TOML don't do this. It looks unused in the example config but is preserved in `Section::append`. Recommend: keep it for INI compatibility; ignore for TOML (TOML strings have their own escape rules).
 
+**Decision:** Keep the `\#` escape in INI, matching existing `Section::append` behavior verbatim. TOML uses its own string escapes per the TOML spec; the rule is irrelevant there.
+
 ### 6.11 Empty values vs missing keys
 
 In the current code, `key=` (empty value) fails the regex and falls through to `values_` — i.e. the key disappears and the line becomes a bare value. This is almost certainly a bug. Recommend: in strict mode, reject `key=` with an explicit error.
+
+**Decision:** Reproduce existing INI behavior verbatim — `key=` fails the kv regex and becomes a bare-value line. The "key" is effectively lost (consumers asking for it via the kv lookup will not find it). Lossy but compat-first. TOML naturally rejects `key =` at the spec level (it's a syntax error). The behavior may be tightened in a future INI-strictness pass.
 
 ### 6.12 Section header inside a section body
 
 `[name]` lines inside a section reset the parser's notion of "current section" — there is no nesting; you can't have a section inside a section. TOML supports tables-of-tables, and the rewrite of `[port_*]` may want to use that shape in TOML mode. INI mode keeps the flat layout. **Open question:** define the canonical TOML layout per section group, even if INI has to splice differently.
 
+**Decision:** TOML layout mirrors INI section names 1:1 except for `[port_*]` (resolved in §7 #6: `[port.<name>]`). All other section groups stay flat in TOML — `[node_db]`, `[import_db]`, `[validators]`, `[validator_keys]`, `[validator_list_sites]`, `[validator_list_keys]`, `[validator_list_threshold]`, `[overlay]`, `[sqlite]`, etc. remain top-level tables. Rationale: keeps `--convert-config` simple (mostly a section-rename pass) and lets operators read INI and TOML side-by-side without surprise.
+
 ### 6.13 Sections silently lifted from `[node_db]` and `[ledger_tx_tables]` onto `Config`
 
 Today the Config class reaches into the `BasicConfig` map to copy `fast_load` and `use_tx_tables` onto `Config` fields. This couples Config to the node-store and ledger-table schemas. Recommend: expose typed sub-structs (`config.node_db.fast_load`, `config.ledger_tx_tables.use_tx_tables`) and update consumers.
+
+**Decision:** Drop the lift. `ParsedConfig.node_db.fast_load` and `ParsedConfig.ledger_tx_tables.use_tx_tables` are the canonical locations. Existing C++ consumers (`config->FAST_LOAD`, `config->useTxTables()`) migrate to the new paths during the step 4 C++ migration.
 
 ### 6.14 Default node size depends on RAM and CPU
 
 `Config::setupControl` picks a `NODE_SIZE` based on installed RAM and `hardware_concurrency()`. Useful default — but it means **the parsed config is not deterministic w.r.t. file contents alone**. The Rust schema should preserve this auto-detection but isolate it behind a `Config::detect()` helper that runs *after* file parsing, so unit tests can substitute a fixed value.
 
+**Decision:** Resolved by §7 #8 — auto-detection moves to Rust along with `kSIZED_ITEMS`. Isolated behind a deterministic step so tests can inject a fixed `NodeSize`.
+
 ### 6.15 `kSIZED_ITEMS` table
 
 `getValueFor(SizedItem)` is the largest single mechanism for "what the actual runtime default is" — a 13-item × 5-size table. ~16 call sites use it. The Rust port must surface this table; recommend: expose as a `const` Rust table with a typed `node_size: NodeSize` enum.
+
+**Decision:** Resolved by §7 #8 — table moves to Rust, exposed as a `const` table with a typed `NodeSize` enum. `getValueFor` becomes an FFI call returning a primitive `int`.
 
 ### 6.16 Order-sensitivity of `[ips]` post-processing
 
 The colon-rewrite happens *after* `BasicConfig::build`, mutating `Config::IPS` / `Config::IPS_FIXED` in place. If we model `[ips]` as `Vec<HostPort>` directly, the rewrite is just the parser for that type — cleaner.
 
+**Decision:** Model as `Vec<HostPort>`. `HostPort = { host: String, port: Option<u16> }`. The parser accepts both `host port` and `host:port` (the colon form requires exactly one `:` to avoid IPv6 collisions, matching the existing rewrite regex). Bare `host` parses to `port: None`. IPv6 addresses with port use the space-separated form `fe80::1 51235`. Consumers (`PeerfinderConfig`) get typed values; the existing post-pass disappears.
+
 ### 6.17 The `legacy()` accessor
 
 `BasicConfig::legacy("foo")` is used as "the single-line bare value of section foo". This is purely an artifact of representing single-value sections through the same `Section` machinery as everything else. In Rust we should just expose each such field as a typed field on the appropriate sub-struct, and retire the term.
+
+**Decision:** Retired. Every single-line section becomes a typed field on `ParsedConfig` (e.g. `database_path: PathBuf`, `network_id: u32`, `debug_logfile: Option<PathBuf>`, `validators_file: Option<PathBuf>`, `node_size: Option<NodeSize>`, …). C++ consumers that today call `config.legacy("network_id")` etc. migrate to typed accessors during step 4. No `legacy(name)` shim is provided — the migration is mechanical and the shim would just delay it.
 
 ---
 
@@ -351,19 +434,62 @@ The colon-rewrite happens *after* `BasicConfig::build`, mutating `Config::IPS` /
 The items below need a decision before the Rust scaffolding is laid down. Most have a tentative recommendation in §6.
 
 1. **Boolean grammar.** Lock in: accept `0|1|true|false` case-insensitive, reject everything else. Anything missing?
+
+   **Decision:** INI accepts `0|1|true|false` case-insensitive; reject everything else (no `yes`/`no`/`on`/`off`). TOML uses its spec-defined `true|false` only (handled by serde). Scope of this rule is the INI deserializer; TOML inherits from the format spec.
 2. **Numeric grammar.** Decimal only, optional leading `+`, no `0x`, no human-friendly units. Confirm?
+
+   **Decision:** INI numbers are decimal only, optional leading `+`, no `0x`/`0b`/`0o`, no human-friendly units (`64M`, `2GB`, `10s`). Hard fail on overflow. TOML numbers follow the TOML spec (which permits `0x`, `0o`, `0b`, and `_` separators). Scope: INI deserializer only.
 3. **Duration grammar.** One grammar (`<int>[unit]`, units `seconds|minutes|hours|days|weeks`, default unit `seconds`) used everywhere. Confirm?
+
+   **Decision:** Per-field grammar, matching existing behavior. `amendment_majority_time` keeps its `<int> minutes|hours|days|weeks` regex with ≥ 15 minutes floor. All other duration fields (`overlay.max_unknown_time`, `overlay.max_diverged_time`, `sweep_interval`, `[perf].log_interval`, `[node_db].age_threshold_seconds`, `[node_db].recovery_wait_seconds`, `[node_db].back_off_milliseconds`, `[websocket_ping_frequency]`) stay bare integers in their named unit. No unified `Duration` type in INI.
+
+   **Format-asymmetric refinement (per #10/#11):** TOML rejects trailing junk in `amendment_majority_time` (grammar tightens to `^\s*(\d+)\s*(minutes|hours|days|weeks)\s*$`). INI keeps the existing loose regex that quietly accepts trailing content. Other duration fields are bare ints in both formats; no grammar difference there.
 4. **Case-sensitivity** of section names and keys: lowercase before lookup (matching the example-cfg documentation) or keep case-sensitive (matching today's implementation)?
+
+   **Decision:** Case-sensitive, matching the existing C++ implementation. Section names and keys are looked up by their exact parsed string. Strict mode will reject mis-cased names as "unknown section/key". The example-cfg documentation will be corrected to match. *Per-section enum values* (e.g. `node_size = TINY` vs `tiny`, `safety_level = HIGH` vs `high`, `relay_validations = ALL` vs `all`) remain case-insensitive where the existing per-field parsers already use `boost::iequals` — that is field-level behavior, not parser-level.
 5. **Path resolution.** Apply "resolve relative to config file unless absolute" uniformly to all path-typed fields, or keep today's piecemeal behavior?
+
+   **Decision:** Piecemeal, matching existing behavior. Only these three paths are auto-resolved relative to the config directory: `debug_logfile`, `validators_file`, `database_path`. All other path-typed fields (`ssl_verify_file`, `ssl_verify_dir`, `node_db.path`, `[perf].perf_log`, `port_*.ssl_key`/`ssl_cert`/`ssl_chain`/`ssl_cert_chain`/`ssl_client_ca`) are taken verbatim. The schema should mark which paths are auto-resolved with a distinct type or annotation so this rule is visible in code.
+
+   **Format-asymmetric refinement (per #11):** TOML applies the uniform rule — every relative path-typed field resolves against the config directory; absolute paths are unchanged. So TOML `ssl_cert = "./server.crt"` is resolved automatically; INI keeps that same line as `./server.crt` verbatim. The piecemeal rule still applies to INI. Implementation note: the Rust crate can use one `Path` type and apply the resolution policy at the format-decoder layer, so the typed schema is identical between formats.
 6. **`[port_*]` modeling.** In INI, keep the existing flat layout. In TOML, prefer `[port.<name>]` table-of-tables or keep `[port_<name>]` flat for parity?
+
+   **Decision:** INI keeps flat layout (`[server]` + `[port_<name>]`) for compatibility. TOML uses table-of-tables: `server.ports = ["rpc_admin", "peer", "ws"]` plus `[port.rpc_admin]`, `[port.peer]`, etc. Internal Rust model is `BTreeMap<String, PortConfig>` with a parallel `Vec<String>` capturing source order. The `--convert-config` INI→TOML transform rewrites `[port_<name>]` to `[port.<name>]`.
 7. **CLI overrides.** Confirm the proposed split: `ParsedConfig` (file only, immutable) + `CliOverrides` (CLI only) → `RuntimeConfig`. CLI fields and their types are listed in §2.2.
+
+   **Decision:** Confirmed. `ParsedConfig` is immutable, file-only. `CliOverrides` is a mutable struct with one optional field per CLI-overridable knob (the 8 fields from §2.2). `RuntimeConfig` is the merged read facade: for each overridable field, its accessor returns the CLI value if set, otherwise the parsed value (`cli.X.unwrap_or(parsed.X)` shape). CLI-only fields (`FORCE_MULTI_THREAD`, anything else test-only) live on `CliOverrides` or a separate test-hook struct, never on `ParsedConfig`.
 8. **`kSIZED_ITEMS` table.** Carry over verbatim or refactor (e.g. per-`SizedItem` typed default + per-`NodeSize` override)?
+
+   **Decision:** Move to Rust along with the `NodeSize` auto-detection. The table itself is pure data (13×5 integers), the `static_assert` is just a sanity guard, and the OS RAM/CPU probe (`sysctl HW_MEMSIZE` / `sysinfo` / `GlobalMemoryStatusEx` and `available_parallelism`) has straightforward Rust equivalents. The Rust crate exposes:
+   - A `NodeSize` enum (`Tiny|Small|Medium|Large|Huge`).
+   - The `SizedItem` enum and the const table.
+   - A `RuntimeConfig::sized_value(SizedItem) -> i32` accessor (or a typed method per item — exact shape decided in step 2).
+   - The `NodeSize` auto-detection logic (RAM threshold walk + CPU cap).
+
+   ~16 C++ call sites become FFI calls into Rust returning a primitive `int` — acceptable cost. Carry the table over **verbatim** (same 13 items, same 5 buckets, same values) — the refactor question (per-item typed defaults vs. flat table) is deferred to step 2 design.
 9. **`validators.txt`.** Keep the "merge sections" model or expose as a dedicated typed sub-document?
+
+   **Decision:** Splice model, matching existing behavior. The Rust parser reads `validators.txt` (resolved relative to the config dir per §5) as a second INI/TOML file and merges its `[validators]`, `[validator_keys]`, `[validator_list_sites]`, `[validator_list_keys]`, `[validator_list_threshold]` sections into the main config. One unified `ParsedConfig` is what consumers see; they don't need to know which file a section came from. In strict mode, overlap between the two files (same section appearing in both) is an error rather than a silent append.
 10. **Silent clamp vs error.** `max_transactions` is silently clamped to `[100,1000]` today and `fetch_depth` to `≥ 10`. In strict mode: error or clamp? Recommend error.
+
+   **Decision:** Format-asymmetric. INI keeps the existing silent-clamp behavior (`max_transactions` coerced to `[100,1000]`, `fetch_depth` floored at 10) so existing rippled.cfg files load unchanged. TOML is strict: out-of-range values fail parse with a clear error message. This pattern — *INI compat-first, TOML strict* — should be applied as the general rule whenever the two formats might diverge on edge-case behavior.
 11. **Strict mode default.** Confirm step 2 ships with strict-by-default, `--check-config` and `--convert-config` as escape hatches.
+
+   **Decision:** **Asymmetric defaults.** INI is **compat-first / lenient by default** — replicates existing parser behavior verbatim, including silent-ignore of unknown keys and unknown sections, and the per-field clamp/error rules from §5 of the validators table. TOML is **strict by default** — unknown keys, unknown sections, and out-of-range values are errors. INI may be tightened later if the community has migrated and the lenience is no longer needed. `--check-config` and `--convert-config` continue to ship in step 4 as migration helpers. This decision **supersedes** the plan doc's earlier "strict from day one" position; the plan doc should be updated.
 12. **Unknown sub-keys in known sections.** Strict mode should reject unknown *keys* inside known sections (e.g. `sqlite.foobar`), not just unknown sections. Confirm?
+
+   **Decision:** Asymmetric, per #11. INI silently ignores unknown keys (matches existing `BasicConfig` behavior: every parsed key sits in `lookup_`, only the keys consumers ask for get read). TOML rejects unknown keys with a `deny_unknown_fields`-style error and a useful "did you mean…?" message where feasible.
 13. **Mutable `Config` during setup.** Today `Config::setup` writes the absolute `database_path` back into the parsed sections. In the new model, do we keep `ParsedConfig` immutable and put the resolved-path on `RuntimeConfig` instead?
+
+   **Decision:** `ParsedConfig` is immutable. Resolved-path views (`database_path` absolutized, `debug_logfile` absolutized, `validators_file` absolutized — the three auto-resolved paths from #5) live on `RuntimeConfig` and are computed during construction. External observable behavior matches today: consumers that read the resolved path after setup get the absolute value.
 14. **Side effects in setup.** `HTTPClient::initializeSSLContext`, `create_directories(dataDir)`, env-var reads, `validators.txt` ingest, `stderr` echo — should the Rust crate own these, or should they remain on the C++ side after Rust hands back a parsed value? Recommend: keep the *parser* pure; expose a separate `bootstrap()` step on the C++ side that performs filesystem and SSL bring-up. This keeps the Rust crate testable.
+
+   **Decision:** Principle — *Rust does anything that doesn't require crossing back into C++.* Concretely:
+   - **Rust:** Config file discovery via env vars (`HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`) and filesystem existence checks; `mkdir -p` of the resolved data directory; path absolutization; `validators.txt` parsing and section merge; `stderr` echo of the loaded config file path when not quiet; cross-field validation (e.g. `checkZeroPorts`, the `validation_seed`/`validator_token` XOR, `network_quorum` ≤ effective `peers_max`); the `RamSizeGb` / CPU probe for `NodeSize` auto-detection (per #8).
+   - **C++:** `HTTPClient::initializeSSLContext` (uses C++ class types and Boost.Asio context — not worth bridging). Stays in a thin C++ bootstrap step that runs after `RuntimeConfig` is constructed.
+   - **Testability:** the Rust crate is testable without C++ — every side effect it owns is either a stdlib filesystem/env call or pure data manipulation, so a fixture-based test rig is straightforward.
 15. **`FORCE_MULTI_THREAD`.** Confirm this is *not* a config field and lives only as a test hook (probably a builder option on `Config` in tests).
+
+   **Decision:** Not a file-backed config field, but a real runtime knob. Production reads it (`Application.cpp:329`); only tests write it. Sits on `CliOverrides` alongside the actual CLI overrides — same shape (post-parse, optional, no file backing). Not exposed as a `--force_multi_thread` CLI flag; the test harness constructs `CliOverrides { force_multi_thread: Some(true), .. }` directly. The umbrella struct may be renamed to something broader than `CliOverrides` (e.g. `ConfigOverrides`) to capture that not every field maps to a CLI flag.
 
 Step 2 should begin once these are answered.
