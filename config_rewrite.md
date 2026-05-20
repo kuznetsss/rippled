@@ -45,33 +45,42 @@ Full replacement of the C++ config implementation with Rust. Rust owns parsing, 
 
    No C++ behavior change yet — the crate exists and is exercised by Rust tests, but rippled still uses the C++ `Config`.
 
-4. **C++ migration.** Replace the C++ `Config`/`BasicConfig` with consumption of the Rust-produced config:
+4. **Agentic review.** Spawn review agents over the step-3 output to surface issues before the human review pass:
+   - **Correctness review.** One agent walks the parser/adapter/validator paths against `config_rewrite_analysis.md` §2–§5, looking for missed fields, wrong defaults, mis-applied clamps, missing cross-section validators.
+   - **Test-coverage review.** One agent walks `crates/config/src/**` and `crates/config/tests/` and checks every grammar primitive, adapter, and validator has both happy-path and failure-mode coverage (per §13 of the design doc).
+   - **Idiomatic-Rust review.** One agent reviews the crate for Rust idiom — borrow-vs-clone discipline, error-type ergonomics, naming, module boundaries, `#[derive]` use, `serde` patterns, FFI surface shape against §10.
+   Output: a consolidated report with concrete file/line callouts. Findings are addressed in-place before step 5.
+
+5. **Human review.** Personal review pass over the step-3 code (informed by the step-4 report). Sign-off here is the precondition for step 6.
+
+6. **C++ migration.** Replace the C++ `Config`/`BasicConfig` with consumption of the Rust-produced config:
    - Wire the Rust crate into rippled's build (Conan + CMake).
-   - Stand up a thin C++ shim that mirrors today's `Config`/`BasicConfig` accessor surface but is backed by the Rust types — so call sites can migrate incrementally.
-   - Migrate every consumer in §3 of the analysis (per-section parsers in `OverlayImpl`, `ServerHandler`, `SHAMapStoreImp`, `TxQ`, `AmendmentTable`, `ValidatorKeys`, etc.) to read from the typed Rust output instead of `Section::get<T>`.
+   - Migrate every consumer in §3 of the analysis (per-section parsers in `OverlayImpl`, `ServerHandler`, `SHAMapStoreImp`, `TxQ`, `AmendmentTable`, `ValidatorKeys`, etc.) to read from the typed Rust output instead of `Section::get<T>`. Per the design doc §11, there is no intermediate C++ shim — call sites move directly to the Rust API via the cxx-generated header.
    - Delete the old C++ `Config`/`BasicConfig`/`ConfigSections` once nothing in-tree depends on them.
    - Ship `--check-config` and `--convert-config` (INI → TOML, plus validation report) per the migration-tooling commitment below.
 
-5. **Documentation support.** Macro-driven markdown generation from option definitions.
+7. **Documentation support.** Macro-driven markdown generation from option definitions.
 
-6. **Validation support.** Macro-driven per-field validators run after parse.
+8. **Validation support.** Macro-driven per-field validators run after parse.
 
 ## Decisions / agreed positions
 
 - **Approach:** full replacement, not a parsing shim. Larger blast radius, accepted in exchange for a clean Rust-shaped interface.
 - **INI non-standard sections.** rippled's INI is not standard `key=value`; several sections are bare-line lists. Approach: implement a custom serde INI deserializer that understands the section shapes. Concrete strategy (two-stage parse vs. fully custom deserializer) is an open question to be resolved in step 2 (design).
 - **Asymmetric strict mode.** INI is **lenient by default** — replicates existing `BasicConfig` behavior, including silent-ignore of unknown keys / sections, silent clamps on the fields that already clamp today, and the existing per-field grammars. TOML is **strict by default** — unknown keys/sections, out-of-range values, and trailing-junk in custom grammars (e.g. `amendment_majority_time`) are errors. INI may be tightened later. See the analysis doc for the field-by-field rules.
-- **Migration tooling.** rippled will ship `--check-config` and `--convert-config` flags (INI → TOML, plus validation report) to ease the transition. These land in step 4.
+- **Migration tooling.** rippled will ship `--check-config` and `--convert-config` flags (INI → TOML, plus validation report) to ease the transition. These land in step 6.
 - **Fallback.** Both formats supported indefinitely. INI is the path of least resistance for existing operators; TOML is the recommended format for new deployments and gets the cleaner schema (table-of-tables for `[port.*]`, uniform path resolution, etc.).
 
 ## Out of scope (for now)
 
-- Choice of macro/derive crates for docs and validation (decided when steps 5–6 begin).
+- Choice of macro/derive crates for docs and validation (decided when steps 7–8 begin).
 - Hot reload / runtime reconfiguration.
 - Any change to the set of config options themselves — this is a rewrite, not a redesign of what's configurable.
 
 ## Next step
 
-Step 1 is complete; see [`config_rewrite_analysis.md`](./config_rewrite_analysis.md), which ends with a list of open questions for review.
+Steps 1 and 2 are complete:
+- Step 1 — [`config_rewrite_analysis.md`](./config_rewrite_analysis.md).
+- Step 2 — [`config_rewrite_design.md`](./config_rewrite_design.md); all open questions resolved in §15.
 
-Begin step 2 once those open questions are answered: produce `config_rewrite_design.md` specifying the Rust crate's structure, types, parsing strategy, and FFI surface. Step 3 (Rust implementation) does not start until step 2 is signed off.
+Step 3 (Rust implementation) builds against the design doc. Step 4 (agentic review) and step 5 (human review) gate step 6 (C++ migration).
