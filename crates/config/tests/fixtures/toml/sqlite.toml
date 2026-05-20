@@ -1,0 +1,4 @@
+# sqlite.toml — [sqlite] with safety_level form.
+[sqlite]
+safety_level = "High"
+journal_size_limit = 2000000

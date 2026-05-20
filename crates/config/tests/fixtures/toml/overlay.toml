@@ -1,0 +1,5 @@
+# overlay.toml — [overlay] section.
+[overlay]
+max_unknown_time = 900
+max_diverged_time = 120
+ip_limit = 3

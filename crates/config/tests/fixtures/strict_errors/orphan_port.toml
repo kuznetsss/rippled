@@ -1,0 +1,5 @@
+# orphan_port.toml — [port.foo] without a matching entry in server.ports.
+# TOML strict mode should produce OrphanPortTable.
+[port.foo]
+port = 9999
+protocol = ["Http"]

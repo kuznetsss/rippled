@@ -1,0 +1,18 @@
+# server_and_ports.toml — [server] with ports array and [port.*] tables.
+[server]
+ports = ["rpc_admin", "peer", "ws_admin"]
+
+[port.rpc_admin]
+port = 5005
+protocol = ["Http"]
+admin = ["127.0.0.1/32"]
+
+[port.peer]
+port = 51235
+protocol = ["Peer"]
+
+[port.ws_admin]
+port = 6006
+protocol = ["Ws"]
+admin = ["127.0.0.1/32"]
+send_queue_limit = 500

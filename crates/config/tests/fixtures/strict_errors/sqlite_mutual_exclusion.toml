@@ -1,0 +1,4 @@
+# sqlite_mutual_exclusion.toml — safety_level + journal_mode are mutually exclusive.
+[sqlite]
+safety_level = "High"
+journal_mode = "Wal"

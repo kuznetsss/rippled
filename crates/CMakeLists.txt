@@ -35,4 +35,4 @@ function(add_xrpl_crate name)
     target_link_libraries(xrpl_crates_cxxbridge INTERFACE ${name}_cxxbridge)
 endfunction()
 
-add_xrpl_crate(rs_config CRATE config FILES lib.rs)
+add_xrpl_crate(rs_config CRATE config FILES ffi.rs)

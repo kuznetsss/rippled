@@ -1,0 +1,3 @@
+# unknown_overlay_key.toml — unrecognised key inside [overlay] triggers an error in TOML strict mode.
+[overlay]
+turbo_mode = true

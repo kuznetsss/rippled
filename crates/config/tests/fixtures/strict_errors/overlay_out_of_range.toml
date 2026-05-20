@@ -1,0 +1,4 @@
+# overlay_out_of_range.toml — max_unknown_time=100 is below minimum of 300.
+# TOML strict mode returns OutOfRange; INI would silently clamp to 300.
+[overlay]
+max_unknown_time = 100

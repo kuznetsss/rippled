@@ -1,0 +1,6 @@
+# validators.toml — validators as inline-table array.
+validators = [
+  { key = "nHUjb9dzMBJqF1w5PdQEWS82MmRFRCzxNcXdJoSWkBaTsWMJLCTu", label = "Validator Alpha" },
+  { key = "nHUon2tpyJEHHYGmxqeGu37cvPYHzrMtUNQFVdCgGNvEkjmCpTqK" },
+  { key = "nHB5XIupk1A1YnRmHzZq2usDGECJd2MbMcKqfXbmCFCAmHbMRKqH", label = "Key One" },
+]

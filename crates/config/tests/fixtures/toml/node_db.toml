@@ -1,0 +1,7 @@
+# node_db.toml — [node_db] section.
+[node_db]
+kind = "NuDb"
+path = "/tmp/test_nudb"
+online_delete = 512
+advisory_delete = false
+earliest_seq = 1
