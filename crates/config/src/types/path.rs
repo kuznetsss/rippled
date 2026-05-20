@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A path that `Config::bootstrap()` will resolve relative to the config
 /// directory. Stored as-parsed; only absolutized during bootstrap.
@@ -7,8 +7,19 @@ use serde::{Deserialize, Serialize};
 /// This is distinct from a plain `PathBuf` so that the resolution policy is
 /// visible in the schema: callers that receive a `RelPath` know it may still be
 /// relative until bootstrap has run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Deserializes from a string (not from a `{ "0": "..." }` tuple struct form).
+/// This makes TOML schema deserialization work correctly for types like `PerfConfig`
+/// that embed `Option<RelPath>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RelPath(pub PathBuf);
+
+impl<'de> Deserialize<'de> for RelPath {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(RelPath(PathBuf::from(s)))
+    }
+}
 
 impl RelPath {
     pub fn new(p: PathBuf) -> Self {

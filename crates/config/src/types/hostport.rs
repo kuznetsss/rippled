@@ -329,4 +329,58 @@ mod tests {
         // [::1]garbage (no colon prefix) should be an error
         assert!("[::1]garbage".parse::<HostPort>().is_err());
     }
+
+    // ---- F41: IPv6 ambiguous edge cases ----
+
+    /// `fe80::1:c83b` has multiple colons (colon_count != 1), so the colon-split
+    /// path is NOT taken.  It falls through to bare-host parse.  `fe80::1:c83b` is
+    /// a valid IPv6 address, so it is parsed as a bare IPv6 host with no port.
+    /// This contrasts with `fe80::1:51235` which is NOT a valid IPv6 address
+    /// (51235 > 0xffff) and would be classified as a Hostname.
+    #[test]
+    fn multi_colon_ipv6_with_valid_hex_suffix_is_bare_ipv6() {
+        // fe80::1:c83b is a valid IPv6 address (all groups ≤ 0xffff).
+        let h = hp("fe80::1:c83b");
+        // Multiple colons → not treated as host:port.
+        assert!(matches!(h.host, HostKind::Ipv6(_)));
+        assert_eq!(h.port, None);
+    }
+
+    /// `fe80::1:51235` has multiple colons, falls to bare-host parse, but
+    /// `51235 > 0xffff` so it is NOT a valid IPv6 group — parsed as Hostname.
+    #[test]
+    fn multi_colon_with_decimal_port_is_hostname() {
+        // This documents the actual behavior: fe80::1:51235 is not a valid IPv6
+        // address (51235 > 65535), so it becomes a Hostname, not a split host:port.
+        let h = hp("fe80::1:51235");
+        assert!(matches!(h.host, HostKind::Hostname(_)));
+        assert_eq!(h.port, None);
+    }
+
+    /// To attach a port to an IPv6 address, use the bracketed form `[ipv6]:port`.
+    #[test]
+    fn bracketed_ipv6_with_numeric_port_suffix_parses() {
+        let h = hp("[fe80::1]:51235");
+        assert!(matches!(h.host, HostKind::Ipv6(_)));
+        assert_eq!(h.port, Some(51235));
+    }
+
+    /// `a::b:c:1234` — multiple colons, not a valid IPv4, but IS a valid IPv6
+    /// address (`a::b:c:1234` = `000a:0000:0000:0000:0000:000b:000c:1234`).
+    /// Parsed as bare IPv6 with no port.
+    #[test]
+    fn multi_colon_ipv6_without_explicit_port() {
+        let h = hp("a::b:c:1234");
+        assert!(matches!(h.host, HostKind::Ipv6(_)));
+        assert_eq!(h.port, None);
+    }
+
+    /// A single-colon that looks like `ipv6-like:port` but has exactly one colon
+    /// → treated as `host:port`.  `abc:8080` (one colon) → host "abc" port 8080.
+    #[test]
+    fn single_colon_non_ipv6_treated_as_host_port() {
+        let h = hp("abc:8080");
+        assert!(matches!(h.host, HostKind::Hostname(_)));
+        assert_eq!(h.port, Some(8080));
+    }
 }

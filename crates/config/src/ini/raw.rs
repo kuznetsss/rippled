@@ -53,7 +53,7 @@ impl RawSection {
 pub struct RawSections {
     /// Sections in source order.
     pub sections: Vec<RawSection>,
-    /// Maps lower-cased section name → indices into `sections`.
+    /// Maps section name (verbatim, case-sensitive per design §7 #4) → indices into `sections`.
     by_name: HashMap<String, Vec<usize>>,
 }
 
@@ -63,23 +63,24 @@ impl RawSections {
         self.by_name.clear();
         for (i, sec) in self.sections.iter().enumerate() {
             self.by_name
-                .entry(sec.name.to_lowercase())
+                .entry(sec.name.clone())
                 .or_default()
                 .push(i);
         }
     }
 
-    /// Iterate over all sections whose (lowercased) name matches `name`.
+    /// Iterate over all sections whose name exactly matches `name` (case-sensitive).
+    /// Mis-cased section names will not match and will silently fall through to the
+    /// unknown-section arm in the adapter, matching C++ BasicConfig behavior.
     pub fn sections_named<'a>(
         &'a self,
         name: &str,
     ) -> impl Iterator<Item = &'a RawSection> {
-        let lower = name.to_lowercase();
-        let indices = self.by_name.get(&lower).map(Vec::as_slice).unwrap_or(&[]);
+        let indices = self.by_name.get(name).map(Vec::as_slice).unwrap_or(&[]);
         indices.iter().map(move |&i| &self.sections[i])
     }
 
-    /// Return the first section matching `name`, if any.
+    /// Return the first section matching `name` (case-sensitive), if any.
     pub fn first_named(&self, name: &str) -> Option<&RawSection> {
         self.sections_named(name).next()
     }
@@ -192,14 +193,14 @@ mod tests {
     }
 
     #[test]
-    fn sections_named_case_insensitive_lookup() {
+    fn sections_named_case_sensitive_lookup() {
         let mut rs = RawSections::default();
         rs.sections.push(make_section("overlay", vec![]));
         rs.build_index();
 
-        // names are stored lowercase already, lookup should be case insensitive
-        assert_eq!(rs.sections_named("OVERLAY").count(), 1);
-        assert_eq!(rs.sections_named("Overlay").count(), 1);
+        // Lookup is case-sensitive per design §7 #4. Only exact match returns results.
+        assert_eq!(rs.sections_named("OVERLAY").count(), 0);
+        assert_eq!(rs.sections_named("Overlay").count(), 0);
         assert_eq!(rs.sections_named("overlay").count(), 1);
     }
 

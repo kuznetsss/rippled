@@ -45,13 +45,20 @@ Full replacement of the C++ config implementation with Rust. Rust owns parsing, 
 
    No C++ behavior change yet — the crate exists and is exercised by Rust tests, but rippled still uses the C++ `Config`.
 
+   Output: `crates/config/` (sources under `src/{config,bootstrap,error,ffi,ini/*,toml/*,types/*}.rs`, fixture-driven integration tests under `tests/`). **Status: complete.**
+
 4. **Agentic review.** Spawn review agents over the step-3 output to surface issues before the human review pass:
    - **Correctness review.** One agent walks the parser/adapter/validator paths against `config_rewrite_analysis.md` §2–§5, looking for missed fields, wrong defaults, mis-applied clamps, missing cross-section validators.
    - **Test-coverage review.** One agent walks `crates/config/src/**` and `crates/config/tests/` and checks every grammar primitive, adapter, and validator has both happy-path and failure-mode coverage (per §13 of the design doc).
    - **Idiomatic-Rust review.** One agent reviews the crate for Rust idiom — borrow-vs-clone discipline, error-type ergonomics, naming, module boundaries, `#[derive]` use, `serde` patterns, FFI surface shape against §10.
    Output: a consolidated report with concrete file/line callouts. Findings are addressed in-place before step 5.
 
-5. **Human review.** Personal review pass over the step-3 code (informed by the step-4 report). Sign-off here is the precondition for step 6.
+5. **Human review.** Personal review pass over the step-3 code (informed by the step-4 report and verification pass at [`config_rewrite_review_verification.md`](./config_rewrite_review_verification.md)). Sign-off here is the precondition for step 6.
+
+   Open items the verification pass flagged as needing a human decision (see the verification doc for full context):
+   - **F29 — `ConfigError: Clone + Arc<io::Error>`.** The original Clone-is-needless nit is defensible again now that F12 made `ConfigOutcome` materialize `error_msg: String` eagerly; no remaining call site clones `ConfigError`. Decide whether to drop the `Clone` derive (and the `Arc` wrapper around `io::Error`) or leave them in place as defensive surface.
+   - **F33 — 64-GiB "Huge" node-size threshold in `bootstrap.rs`.** The WONT FIX rationale is internally inconsistent. Read the C++ `getValueFor`/sized-items walk direction (~10 min) to confirm whether the Rust 64-GiB floor matches the C++ or extends it; either confirm the deliberate extension or align with C++.
+   - **F42 — `SourceSpan` not propagated to adapt-stage errors.** Design §12 promises file:line:col error messages, but spans don't reach `adapt.rs` errors. The "deferred to follow-up" rebuttal is not authorized by the design doc. Decide whether to require span plumbing (~40 call sites) before step 5 sign-off or amend the design to formally defer it.
 
 6. **C++ migration.** Replace the C++ `Config`/`BasicConfig` with consumption of the Rust-produced config:
    - Wire the Rust crate into rippled's build (Conan + CMake).
@@ -79,8 +86,9 @@ Full replacement of the C++ config implementation with Rust. Rust owns parsing, 
 
 ## Next step
 
-Steps 1 and 2 are complete:
+Steps 1–3 are complete:
 - Step 1 — [`config_rewrite_analysis.md`](./config_rewrite_analysis.md).
 - Step 2 — [`config_rewrite_design.md`](./config_rewrite_design.md); all open questions resolved in §15.
+- Step 3 — `crates/config/` Rust implementation.
 
-Step 3 (Rust implementation) builds against the design doc. Step 4 (agentic review) and step 5 (human review) gate step 6 (C++ migration).
+Step 4 (agentic review) is in progress; its consolidated report and developer responses gate step 5 (human review), which in turn gates step 6 (C++ migration).

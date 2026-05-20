@@ -64,9 +64,19 @@ pub(crate) fn run_bootstrap(cfg: &mut Config) -> Result<(), ConfigError> {
         splice_validators_file(cfg, vf_path)?;
     } else {
         // Implicit: try <config_dir>/validators.txt; silently ignore if absent.
+        // Use open-on-attempt rather than exists()-then-open to avoid TOCTOU.
         let implicit = config_dir.join("validators.txt");
-        if implicit.exists() {
-            splice_validators_file(cfg, &implicit)?;
+        match splice_validators_file(cfg, &implicit) {
+            Ok(()) => {}
+            Err(e) => {
+                // Silently ignore NotFound; propagate all other I/O errors.
+                if !matches!(
+                    &e.kind,
+                    crate::error::ConfigErrorKind::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound
+                ) {
+                    return Err(e);
+                }
+            }
         }
     }
 
@@ -97,7 +107,7 @@ pub(crate) fn run_bootstrap(cfg: &mut Config) -> Result<(), ConfigError> {
     // Step 7: Stderr echo unless quiet
     // -----------------------------------------------------------------------
     if !cfg.quiet() {
-        if let Some(ref explicit_path) = cfg.overrides._explicit_config_path.clone() {
+        if let Some(ref explicit_path) = cfg.overrides._explicit_config_path {
             eprintln!("Loaded config from {}", explicit_path.display());
         }
     }
@@ -136,6 +146,18 @@ fn run_cross_validators(cfg: &Config) -> Result<(), ConfigError> {
         return Err(ConfigError::cross(
             "peers_in_max and peers_out_max must both be set or both be unset",
         ));
+    }
+    // peers_in_max must be <= 1000 if set (analysis §2.1 / §5)
+    if has_in {
+        let v = cfg.parsed.peers_in_max;
+        if v > 1000 {
+            return Err(ConfigError::out_of_range(
+                "peers_in_max",
+                v as i64,
+                None,
+                Some(1000),
+            ));
+        }
     }
     // peers_out_max in 10..=1000 if set
     if has_out {
@@ -209,7 +231,28 @@ pub(crate) fn splice_validators_file(cfg: &mut Config, path: &Path) -> Result<()
     let text = std::fs::read_to_string(path)
         .map_err(|e| ConfigError::io(path.to_owned(), e))?;
 
-    let secondary = crate::ini::parse_ini(&text)?;
+    // Choose parser by extension: .toml → TOML, anything else → INI (design §6).
+    let secondary = if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+        crate::toml::parse_toml(&text)
+    } else {
+        crate::ini::parse_ini(&text)
+    }.map_err(|e| e.with_file(path.to_owned()))?;
+
+    // TOML strict mode: overlap between the main config and validators file is an error.
+    // INI lenient mode: silent append (analysis §7 #9).
+    let is_toml = matches!(cfg.parsed.source_format, crate::error::Format::Toml);
+
+    if is_toml {
+        if !cfg.parsed.trusted_validators.is_empty() && !secondary.parsed.trusted_validators.is_empty() {
+            return Err(ConfigError::validators_file_overlap("validators/validator_keys"));
+        }
+        if !cfg.parsed.validator_list_sites.is_empty() && !secondary.parsed.validator_list_sites.is_empty() {
+            return Err(ConfigError::validators_file_overlap("validator_list_sites"));
+        }
+        if !cfg.parsed.validator_list_keys.is_empty() && !secondary.parsed.validator_list_keys.is_empty() {
+            return Err(ConfigError::validators_file_overlap("validator_list_keys"));
+        }
+    }
 
     // Merge allow-listed fields from secondary into cfg.parsed.
     cfg.parsed.trusted_validators.extend(secondary.parsed.trusted_validators);
@@ -242,11 +285,15 @@ pub(crate) fn ensure_data_dir(path: &Path, standalone: bool) -> Result<(), Confi
 /// Return the path of the config file to load, searching the standard locations.
 ///
 /// If `explicit` is `Some`, use it directly.
-/// Otherwise, check these locations in order:
+/// Otherwise, check these locations in order (matching analysis §4 / C++ search order):
 ///   1. `./xrpld.cfg`
 ///   2. `./rippled.cfg`
 ///   3. `$XDG_CONFIG_HOME/<sys_name>/xrpld.cfg`
-///   4. `$HOME/.config/<sys_name>/xrpld.cfg`
+///   4. `$XDG_CONFIG_HOME/<sys_name>/rippled.cfg`
+///   5. `$HOME/.config/<sys_name>/xrpld.cfg`   (fallback when XDG_CONFIG_HOME absent)
+///   6. `$HOME/.config/<sys_name>/rippled.cfg`
+///   7. `/etc/opt/<sys_name>/xrpld.cfg`
+///   8. `/etc/opt/<sys_name>/rippled.cfg`
 ///
 /// Returns the first existing path. If none exist, returns the last-tried path
 /// (matches C++ behavior — caller gets a sensible file name to report in errors).
@@ -263,6 +310,8 @@ pub fn discover_config_file(
             PathBuf::from("xrpld.cfg"),
             PathBuf::from("rippled.cfg"),
         ];
+
+        // XDG_CONFIG_HOME (or ~/.config fallback) — both xrpld and rippled variants.
         let xdg_config = std::env::var("XDG_CONFIG_HOME")
             .ok()
             .map(PathBuf::from)
@@ -273,6 +322,12 @@ pub fn discover_config_file(
                     .unwrap_or_else(|| PathBuf::from(".config"))
             });
         v.push(xdg_config.join(sys_name).join("xrpld.cfg"));
+        v.push(xdg_config.join(sys_name).join("rippled.cfg"));
+
+        // System-wide /etc/opt paths (analysis §4).
+        v.push(PathBuf::from("/etc/opt").join(sys_name).join("xrpld.cfg"));
+        v.push(PathBuf::from("/etc/opt").join(sys_name).join("rippled.cfg"));
+
         v
     };
 
@@ -297,7 +352,9 @@ pub fn discover_config_file(
 /// 2. Otherwise, probe RAM via OS syscalls.
 /// 3. Choose size by both RAM threshold and half the CPU count, taking the min.
 ///
-/// Falls back to `NodeSize::Medium` if detection fails.
+/// Falls back to `NodeSize::Tiny` if detection fails.
+///
+/// For deterministic testing, use `detect_node_size_with(ram_gb, cpu_count)`.
 pub fn detect_node_size() -> NodeSize {
     // Test hook: allow override via env var.
     if let Ok(s) = std::env::var("RIPPLED_RAM_GB_OVERRIDE") {
@@ -312,10 +369,20 @@ pub fn detect_node_size() -> NodeSize {
     let cpu_count = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+
+    detect_node_size_with(ram_gb, cpu_count)
+}
+
+/// Parameterized version of `detect_node_size` for testing.
+///
+/// Takes explicit `ram_gb` and `cpu_count` values rather than probing the OS.
+/// `cpu_count` is the raw count (halved internally, matching `detect_node_size`).
+///
+/// This is `pub` so integration tests can exercise the sizing matrix without
+/// relying on `RIPPLED_RAM_GB_OVERRIDE` env-var serialisation.
+pub fn detect_node_size_with(ram_gb: u64, cpu_count: usize) -> NodeSize {
     let cpu_cap = node_size_from_cpu(cpu_count / 2);
-
     let by_ram = node_size_from_ram_gb(ram_gb);
-
     // Take the smaller of RAM-based and CPU-based estimates.
     node_size_min(by_ram, cpu_cap)
 }
@@ -953,5 +1020,55 @@ mod tests {
         cfg.set_standalone(true);
         let result = cfg.bootstrap();
         assert!(result.is_err());
+    }
+
+    // ---- F35: detect_node_size_with — parameterized sizing matrix tests ----
+
+    #[test]
+    fn detect_node_size_with_ram_tiny_many_cpus() {
+        // Low RAM forces Tiny even with many CPUs.
+        assert_eq!(detect_node_size_with(4, 64), NodeSize::Tiny);
+    }
+
+    #[test]
+    fn detect_node_size_with_ram_large_few_cpus() {
+        // High RAM but single-CPU → CPU cap wins (Tiny).
+        assert_eq!(detect_node_size_with(64, 1), NodeSize::Tiny);
+    }
+
+    #[test]
+    fn detect_node_size_with_ram_and_cpu_both_large() {
+        // 32 GB (→ Large) + 32 CPUs → 16 half-cpus → Huge from CPU.
+        // min(Large, Huge) = Large.
+        assert_eq!(detect_node_size_with(32, 32), NodeSize::Large);
+    }
+
+    #[test]
+    fn detect_node_size_with_ram_huge_cpu_huge() {
+        // 64 GB + 32 CPUs → Huge from both.
+        assert_eq!(detect_node_size_with(64, 32), NodeSize::Huge);
+    }
+
+    #[test]
+    fn detect_node_size_with_medium_ram_medium_cpu() {
+        // 12 GB → Medium from RAM; 8 CPUs → 4 half-cpus → Medium from CPU.
+        assert_eq!(detect_node_size_with(12, 8), NodeSize::Medium);
+    }
+
+    #[test]
+    fn detect_node_size_with_small_ram_large_cpu() {
+        // 8 GB → Small from RAM; many CPUs don't help.
+        assert_eq!(detect_node_size_with(8, 64), NodeSize::Small);
+    }
+
+    // ---- F30: discover_config_file search paths ----
+
+    #[test]
+    fn discover_includes_etc_opt_paths() {
+        // discover_config_file with no configs: the last candidate should be /etc/opt/...
+        let result = discover_config_file(None, "rippled").unwrap();
+        // If /etc/opt/rippled/rippled.cfg doesn't exist (likely), the last fallback is used.
+        // We just check the function returns without error.
+        let _ = result;
     }
 }

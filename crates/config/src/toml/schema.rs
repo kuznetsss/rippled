@@ -739,6 +739,24 @@ impl Parsed {
                 self.network_quorum, self.peers_max
             )));
         }
+        // peers_in_max <= 1000 (analysis §2.1 / §5)
+        if self.peers_in_max > 1000 {
+            return Err(ConfigError::out_of_range(
+                "peers_in_max",
+                self.peers_in_max as i64,
+                None,
+                Some(1000),
+            ));
+        }
+        // peers_out_max in 10..=1000 if nonzero (analysis §5)
+        if self.peers_out_max > 0 && !(10..=1000).contains(&self.peers_out_max) {
+            return Err(ConfigError::out_of_range(
+                "peers_out_max",
+                self.peers_out_max as i64,
+                Some(10),
+                Some(1000),
+            ));
+        }
         Ok(())
     }
 }
@@ -1105,8 +1123,8 @@ pub(super) fn root_to_config(root: Root) -> Result<Config, ConfigError> {
         }
     }
 
-    // Also keep voting_config in sync (Parsed has both voting and voting_config)
-    parsed.voting_config = parsed.voting.clone();
+    // Mark this config as TOML-sourced (used by bootstrap for format-specific rules).
+    parsed.source_format = crate::error::Format::Toml;
 
     // ---- top-level cross-section validation ----
     parsed.validate_strict_toplevel()?;
@@ -1781,10 +1799,12 @@ safety_level = "High"
     }
 
     #[test]
-    fn port_listed_but_no_table_uses_defaults() {
+    fn port_listed_but_no_table_errors_via_zero_port() {
         // server.ports lists "rpc" but no [port.rpc] table exists.
-        // According to the impl this creates a PortConfig with port=0 then validates,
-        // which should fail the port>0 check.
+        // The impl synthesises a default PortConfig (port=0) which then fails the
+        // port > 0 check in validate_strict.  This is a TOML strict-mode error; an
+        // INI config with a declared port but no corresponding section is silently
+        // skipped (lenient mode).
         let err = parse(
             r#"
             [server]

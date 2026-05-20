@@ -37,24 +37,26 @@ pub fn parse_amendment_majority_time(s: &str, strict: bool) -> Result<Duration, 
 
     let rest = s[digit_end..].trim_start();
 
-    // Match the unit
-    let (unit_secs, unit_len) = if rest.starts_with("weeks") {
-        (7 * 24 * 3600u64, "weeks".len())
-    } else if rest.starts_with("days") {
-        (24 * 3600u64, "days".len())
-    } else if rest.starts_with("hours") {
-        (3600u64, "hours".len())
-    } else if rest.starts_with("minutes") {
-        (60u64, "minutes".len())
-    } else {
-        return Err(ConfigError::grammar(
+    // Match the unit by splitting on whitespace and comparing the exact word.
+    // Using exact word matching prevents "minutess" or "days_extra" from silently
+    // matching as "minutes"/"days" in loose INI mode (defensive against future units
+    // that share a prefix, e.g. "months" sharing "m" with "minutes").
+    let (word, after_unit) = match rest.find(|c: char| c.is_whitespace()) {
+        Some(pos) => (&rest[..pos], rest[pos..].trim_start()),
+        None => (rest, ""),
+    };
+
+    let unit_secs: u64 = match word {
+        "weeks"   => 7 * 24 * 3600,
+        "days"    => 24 * 3600,
+        "hours"   => 3600,
+        "minutes" => 60,
+        _ => return Err(ConfigError::grammar(
             "amendment_majority_time",
             s,
             "expected unit: minutes, hours, days, or weeks",
-        ));
+        )),
     };
-
-    let after_unit = &rest[unit_len..];
 
     if strict && !after_unit.trim().is_empty() {
         return Err(ConfigError::grammar(
@@ -219,17 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn unit_prefix_match_minutess_is_ok() {
-        // "minutess" starts with "minutes" — the parser accepts it in loose mode
-        // because it matches the "minutes" prefix and the trailing 's' becomes
-        // trailing junk (ignored in INI/loose mode).
-        let d = parse_amendment_majority_time("30 minutess", false).unwrap();
-        assert_eq!(d, Duration::from_secs(30 * 60));
+    fn unit_prefix_match_minutess_is_err() {
+        // With exact word matching, "minutess" does not match any known unit.
+        // This is intentional (F32): prefix matching was fragile; exact words are explicit.
+        assert!(parse_amendment_majority_time("30 minutess", false).is_err());
     }
 
     #[test]
     fn unit_prefix_match_minutess_strict_is_err() {
-        // In strict mode trailing junk is rejected.
+        // Exact match: "minutess" is unknown in both strict and loose mode.
         assert!(parse_amendment_majority_time("30 minutess", true).is_err());
     }
 

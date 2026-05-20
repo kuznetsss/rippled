@@ -27,68 +27,70 @@ use crate::error::ConfigError;
 
 /// Wraps `Result<Box<Config>, ConfigError>`.
 /// C++ accesses it through `has_value()`, `has_error()`, `error()`, `into_value()`.
-pub struct ConfigOutcome(Result<Box<Config>, ConfigError>);
+///
+/// The error message is eagerly materialized at construction time into `error_msg`,
+/// so `error()` can return a borrow with no allocation and no memory leak.
+pub struct ConfigOutcome {
+    inner: Result<Box<Config>, ConfigError>,
+    /// Pre-materialized error message (empty string when Ok).
+    error_msg: String,
+}
 
 impl ConfigOutcome {
     pub fn has_value(&self) -> bool {
-        self.0.is_ok()
+        self.inner.is_ok()
     }
 
     pub fn has_error(&self) -> bool {
-        self.0.is_err()
+        self.inner.is_err()
     }
 
+    /// Returns the error message.  The borrow is tied to the lifetime of this outcome
+    /// so it is safe to return without leaking.
     pub fn error(&self) -> &str {
-        match &self.0 {
-            Ok(_) => "",
-            Err(e) => {
-                // Cache the message string on the struct itself by using a once-set field.
-                // We materialise the message into a field stored in a Box<String> inside
-                // the error variant; for now use a simpler approach: leak a copy.
-                // SAFETY: leaking a String to get a 'static &str is safe (no use-after-free).
-                // In production this is called at most once (on startup failure), so the
-                // tiny leak is acceptable.
-                let s = e.message();
-                let leaked: &'static str = Box::leak(s.into_boxed_str());
-                leaked
-            }
-        }
+        &self.error_msg
     }
 
     pub fn into_value(self: Box<Self>) -> Box<Config> {
-        self.0.expect("ConfigOutcome::into_value called on an error outcome")
+        self.inner.expect("ConfigOutcome::into_value called on an error outcome")
     }
 }
 
 impl From<Result<Box<Config>, ConfigError>> for ConfigOutcome {
     fn from(r: Result<Box<Config>, ConfigError>) -> Self {
-        ConfigOutcome(r)
+        let error_msg = match &r {
+            Ok(_) => String::new(),
+            Err(e) => e.message(),
+        };
+        ConfigOutcome { inner: r, error_msg }
     }
 }
 
 /// Wraps `Result<(), ConfigError>`.
-pub struct UnitOutcome(Result<(), ConfigError>);
+pub struct UnitOutcome {
+    inner: Result<(), ConfigError>,
+    /// Pre-materialized error message (empty string when Ok).
+    error_msg: String,
+}
 
 impl UnitOutcome {
     pub fn has_error(&self) -> bool {
-        self.0.is_err()
+        self.inner.is_err()
     }
 
+    /// Returns the error message.  The borrow is tied to the lifetime of this outcome.
     pub fn error(&self) -> &str {
-        match &self.0 {
-            Ok(()) => "",
-            Err(e) => {
-                let s = e.message();
-                let leaked: &'static str = Box::leak(s.into_boxed_str());
-                leaked
-            }
-        }
+        &self.error_msg
     }
 }
 
 impl From<Result<(), ConfigError>> for UnitOutcome {
     fn from(r: Result<(), ConfigError>) -> Self {
-        UnitOutcome(r)
+        let error_msg = match &r {
+            Ok(()) => String::new(),
+            Err(e) => e.message(),
+        };
+        UnitOutcome { inner: r, error_msg }
     }
 }
 

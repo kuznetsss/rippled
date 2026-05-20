@@ -34,6 +34,18 @@ pub struct TxQConfig {
     pub zero_basefee_transaction_feelevel: u32,
 }
 
+impl TxQConfig {
+    /// Apply silent INI clamps per analysis §5:
+    /// - `normal_consensus_increase_percent` clamped to 0..=1000
+    /// - `slow_consensus_decrease_percent` clamped to 0..=100
+    pub(crate) fn validate_lenient(&mut self) {
+        self.normal_consensus_increase_percent =
+            self.normal_consensus_increase_percent.clamp(0, 1000);
+        self.slow_consensus_decrease_percent =
+            self.slow_consensus_decrease_percent.clamp(0, 100);
+    }
+}
+
 impl Default for TxQConfig {
     fn default() -> Self {
         TxQConfig {

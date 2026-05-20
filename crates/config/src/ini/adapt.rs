@@ -18,39 +18,116 @@ use super::raw::{RawLineKind, RawSection, RawSections};
 use super::serde::{from_bare_lines, from_kv_section};
 
 // ---------------------------------------------------------------------------
-// Helper: shadow struct for PortConfig with all-default fields
+// Handwritten port-section adapter (replaces PortConfigProxy + flatten)
 // ---------------------------------------------------------------------------
 //
-// PortConfig.name has no serde default (it's set by the adapter after
-// deserialization), so we use a proxy struct with serde defaults that maps
-// onto the real PortConfig fields. This avoids a "missing field `name`" error
-// when the name key is absent from the INI section (as it always is — the
-// name IS the section header).
-#[derive(serde::Deserialize)]
-#[serde(default)]
-struct PortConfigProxy {
-    port: u16,
-    #[serde(flatten)]
-    effective: PortDefaults,
-}
+// We cannot use #[serde(flatten)] for PortDefaults because serde's flatten
+// machinery calls `deserialize_any`, which our INI ValueDeserializer answers
+// with `visit_str`. The Vec<IpNet> and Vec<PortProtocol> visitors then reject
+// a bare string because they only handle sequences. Instead we walk the kv
+// map explicitly and parse each known field ourselves.
+fn adapt_port_section(sec: &RawSection) -> Result<PortConfig, ConfigError> {
+    use std::net::IpAddr;
+    use std::str::FromStr;
+    use ipnet::IpNet;
 
-impl Default for PortConfigProxy {
-    fn default() -> Self {
-        PortConfigProxy {
-            port: 0,
-            effective: PortDefaults::default(),
+    let map = sec.lookup();
+    let mut pc = PortConfig::default();
+
+    for (key, value) in &map {
+        let v: &str = value;
+        match *key {
+            "port" => {
+                pc.port = parse_ini_int(v)?;
+            }
+            "ip" => {
+                pc.effective.ip = Some(IpAddr::from_str(v.trim()).map_err(|_| {
+                    ConfigError::grammar("port.ip", v, "invalid IP address")
+                })?);
+            }
+            "protocol" => {
+                // Comma-separated list of protocols (e.g. "http,https" or "peer").
+                for proto_str in v.split(',') {
+                    let proto_str = proto_str.trim().to_ascii_lowercase();
+                    let proto = match proto_str.as_str() {
+                        "http" => PortProtocol::Http,
+                        "https" => PortProtocol::Https,
+                        "ws" => PortProtocol::Ws,
+                        "wss" => PortProtocol::Wss,
+                        "peer" => PortProtocol::Peer,
+                        "grpc" => PortProtocol::Grpc,
+                        other => return Err(ConfigError::grammar(
+                            "port.protocol", other, "expected http, https, ws, wss, peer, or grpc",
+                        )),
+                    };
+                    pc.effective.protocol.push(proto);
+                }
+            }
+            "admin" => {
+                // Comma-separated CIDR list (or single IP/CIDR).
+                for net_str in v.split(',') {
+                    let net_str = net_str.trim();
+                    let net = IpNet::from_str(net_str)
+                        .or_else(|_| {
+                            // Plain IP address — treat as host route.
+                            IpAddr::from_str(net_str)
+                                .map(|ip| if ip.is_ipv4() {
+                                    IpNet::from_str(&format!("{}/32", ip)).unwrap()
+                                } else {
+                                    IpNet::from_str(&format!("{}/128", ip)).unwrap()
+                                })
+                        })
+                        .map_err(|_| ConfigError::grammar("port.admin", net_str, "invalid CIDR/IP"))?;
+                    pc.effective.admin.push(net);
+                }
+            }
+            "secure_gateway" => {
+                for net_str in v.split(',') {
+                    let net_str = net_str.trim();
+                    let net = IpNet::from_str(net_str)
+                        .or_else(|_| {
+                            IpAddr::from_str(net_str)
+                                .map(|ip| if ip.is_ipv4() {
+                                    IpNet::from_str(&format!("{}/32", ip)).unwrap()
+                                } else {
+                                    IpNet::from_str(&format!("{}/128", ip)).unwrap()
+                                })
+                        })
+                        .map_err(|_| ConfigError::grammar("port.secure_gateway", net_str, "invalid CIDR/IP"))?;
+                    pc.effective.secure_gateway.push(net);
+                }
+            }
+            "user" => { pc.effective.user = Some(v.to_owned()); }
+            "password" => { pc.effective.password = Some(v.to_owned()); }
+            "admin_user" => { pc.effective.admin_user = Some(v.to_owned()); }
+            "admin_password" => { pc.effective.admin_password = Some(v.to_owned()); }
+            "limit" => {
+                pc.effective.limit = if v.trim().to_ascii_lowercase() == "unlimited" {
+                    PortLimit::Unlimited
+                } else {
+                    PortLimit::Count(parse_ini_int(v)?)
+                };
+            }
+            "send_queue_limit" => { pc.effective.send_queue_limit = parse_ini_int(v)?; }
+            "ssl_key" => { pc.effective.ssl_key = Some(PathBuf::from(v)); }
+            "ssl_cert" => { pc.effective.ssl_cert = Some(PathBuf::from(v)); }
+            "ssl_chain" => { pc.effective.ssl_chain = Some(PathBuf::from(v)); }
+            "ssl_ciphers" => { pc.effective.ssl_ciphers = Some(v.to_owned()); }
+            "ssl_cert_chain" => { pc.effective.ssl_cert_chain = Some(PathBuf::from(v)); }
+            "ssl_client_ca" => { pc.effective.ssl_client_ca = Some(PathBuf::from(v)); }
+            "permessage_deflate" => { pc.effective.permessage_deflate = parse_ini_bool(v)?; }
+            "client_max_window_bits" => { pc.effective.client_max_window_bits = parse_ini_int(v)?; }
+            "server_max_window_bits" => { pc.effective.server_max_window_bits = parse_ini_int(v)?; }
+            "client_no_context_takeover" => { pc.effective.client_no_context_takeover = parse_ini_bool(v)?; }
+            "server_no_context_takeover" => { pc.effective.server_no_context_takeover = parse_ini_bool(v)?; }
+            "compress_level" => { pc.effective.compress_level = parse_ini_int(v)?; }
+            "memory_level" => { pc.effective.memory_level = parse_ini_int(v)?; }
+            // Unknown port-level keys are silently dropped (lenient INI mode).
+            _ => {}
         }
     }
-}
 
-impl From<PortConfigProxy> for PortConfig {
-    fn from(proxy: PortConfigProxy) -> Self {
-        PortConfig {
-            name: String::new(),
-            port: proxy.port,
-            effective: proxy.effective,
-        }
-    }
+    Ok(pc)
 }
 
 // ---------------------------------------------------------------------------
@@ -79,8 +156,7 @@ pub(super) fn adapt(raw: RawSections) -> Result<Config, ConfigError> {
         for name in &port_names {
             // The section name IS the port name (e.g. [port_rpc_admin_local]).
             if let Some(port_sec) = raw.first_named(name) {
-                let proxy: PortConfigProxy = from_kv_section(port_sec)?;
-                let mut pc: PortConfig = proxy.into();
+                let mut pc: PortConfig = adapt_port_section(port_sec)?;
                 pc.name = name.clone();
                 // Apply server-level defaults for fields not set in the port section.
                 apply_port_defaults(&mut pc, &p.server.defaults);
@@ -156,15 +232,19 @@ fn dispatch_section(sec: &RawSection, p: &mut Parsed, _raw: &RawSections) -> Res
         }
         "node_db" => {
             p.node_db = adapt_node_db(sec)?;
+            p.node_db.validate_lenient();
         }
         "import_db" => {
-            p.import_db = Some(adapt_node_db(sec)?);
+            let mut db = adapt_node_db(sec)?;
+            db.validate_lenient();
+            p.import_db = Some(db);
         }
         "sqlite" => {
             p.sqlite = adapt_sqlite(sec)?;
         }
         "transaction_queue" => {
             p.transaction_queue = from_kv_section(sec)?;
+            p.transaction_queue.validate_lenient();
         }
         "insight" => {
             p.insight = adapt_insight(sec)?;
@@ -177,13 +257,13 @@ fn dispatch_section(sec: &RawSection, p: &mut Parsed, _raw: &RawSections) -> Res
         }
         "reduce_relay" => {
             p.reduce_relay = from_kv_section(sec)?;
+            p.reduce_relay.validate_lenient();
         }
         "vl" => {
             p.vl = from_kv_section(sec)?;
         }
         "voting" => {
-            p.voting_config = from_kv_section(sec)?;
-            p.voting = p.voting_config.clone();
+            p.voting = from_kv_section(sec)?;
         }
 
         // ---- Category 2: bare-line lists ----
@@ -360,7 +440,14 @@ fn dispatch_section(sec: &RawSection, p: &mut Parsed, _raw: &RawSections) -> Res
         }
 
         // [port_*] sections are handled in the second pass after [server].
-        // Unknown sections: silently drop (lenient INI per design §5.3).
+        //
+        // The synthetic "__preamble__" section (created by the lexer for lines that
+        // appear before any section header) also falls through here intentionally:
+        // it is an implementation artefact, not a user-visible section, and its
+        // content is silently discarded (matching C++ BasicConfig behavior for the
+        // default-section "" lines that the consumer never looks up).
+        //
+        // All other unknown sections are silently dropped (lenient INI per design §5.3).
         _ => {}
     }
 
@@ -388,10 +475,11 @@ fn adapt_server(sec: &RawSection, p: &mut Parsed) -> Result<(), ConfigError> {
         }
     }
 
-    // kv pairs form the PortDefaults.
-    let defaults: PortDefaults = from_kv_section(sec)?;
+    // kv pairs form the PortDefaults. Use adapt_port_section to avoid the
+    // flatten/deserialize_any issue with Vec<IpNet> and Vec<PortProtocol>.
+    let defaults_pc = adapt_port_section(sec)?;
 
-    p.server = ServerConfig { port_names, defaults };
+    p.server = ServerConfig { port_names, defaults: defaults_pc.effective };
     Ok(())
 }
 
@@ -658,6 +746,9 @@ fn adapt_rpc_startup(sec: &RawSection) -> Result<Vec<serde_json::Value>, ConfigE
 
 /// Adapt `[node_db]` / `[import_db]`.
 /// Known keys are deserialized into `NodeDbConfig`; unknown keys go into `backend_extras`.
+///
+/// Bare-value lines (lines that are not `key=value`) inside `[node_db]` are silently dropped —
+/// this matches C++ lenient INI behavior where non-kv content in a kv section is simply ignored.
 fn adapt_node_db(sec: &RawSection) -> Result<NodeDbConfig, ConfigError> {
     let map = sec.lookup();
     let mut cfg = NodeDbConfig::default();
@@ -818,6 +909,49 @@ impl OverlayConfig {
     pub(crate) fn validate_lenient(&mut self) {
         self.max_unknown_time = self.max_unknown_time.clamp(300, 1800);
         self.max_diverged_time = self.max_diverged_time.clamp(60, 900);
+    }
+}
+
+impl ReduceRelayConfig {
+    /// Apply silent INI clamps per analysis §5:
+    /// - `vp_base_squelch_max_selected_peers` ≥ 3
+    /// - `tx_min_peers` ≥ 10
+    /// - `tx_relay_percentage` in 10..=100
+    pub(crate) fn validate_lenient(&mut self) {
+        self.vp_base_squelch_max_selected_peers = self.vp_base_squelch_max_selected_peers.max(3);
+        self.tx_min_peers = self.tx_min_peers.max(10);
+        self.tx_relay_percentage = self.tx_relay_percentage.clamp(10, 100);
+    }
+}
+
+impl NodeDbConfig {
+    /// Apply silent INI clamps per analysis §5:
+    /// - `earliest_seq` ≥ 1
+    /// - `online_delete` ≥ 256 when set
+    /// - `nudb_block_size` clamped to power-of-2 in 4096..=32768
+    pub(crate) fn validate_lenient(&mut self) {
+        if self.earliest_seq < 1 {
+            self.earliest_seq = 1;
+        }
+        if let Some(od) = self.online_delete {
+            if od < 256 {
+                self.online_delete = Some(256);
+            }
+        }
+        // nudb_block_size must be a power of 2 in [4096, 32768].
+        // If out of range or not a power of 2, clamp to the nearest valid value.
+        let bs = self.nudb_block_size;
+        if bs != 0 && !(4096..=32768).contains(&bs) || (bs != 0 && !bs.is_power_of_two()) {
+            // Round down to previous power of 2 within range.
+            let clamped = bs.clamp(4096, 32768);
+            self.nudb_block_size = if clamped.is_power_of_two() {
+                clamped
+            } else {
+                // Previous power of 2.
+                let prev = 1u32 << (u32::BITS - clamped.leading_zeros() - 1);
+                prev.clamp(4096, 32768)
+            };
+        }
     }
 }
 
@@ -1422,5 +1556,84 @@ mod tests {
         assert_eq!(cfg.max_transactions(), 250); // default
         assert!(!cfg.peer_private()); // default false
         assert_eq!(cfg.peers_max(), 0); // default
+    }
+
+    // ---- F19: unknown feature names survive parse (Phase-3 invariant) ----
+
+    /// Contract: `[features]` entries are raw strings; unknown names survive parse
+    /// so the downstream C++ consumer can apply validation against the registered list.
+    #[test]
+    fn unknown_feature_name_survives_parse() {
+        let cfg = parse("[features]\nDefinitelyNotARealAmendment\nAlsoFake_2099\n");
+        assert!(cfg.features().contains("DefinitelyNotARealAmendment"),
+            "unknown feature name must survive parse (Phase-3 validation deferred to C++ consumer)");
+        assert!(cfg.features().contains("AlsoFake_2099"));
+    }
+
+    // ---- F27: [node_db] unknown key goes to backend_extras ----
+
+    #[test]
+    fn node_db_unknown_key_goes_to_extras() {
+        // "earliestseq" (missing underscore) is not a known key; goes to backend_extras.
+        let cfg = parse("[node_db]\ntype=nudb\npath=/var/db\nearliestseq=42\n");
+        let db = cfg.node_db();
+        assert!(db.backend_extras.contains_key("earliestseq"),
+            "unknown key should land in backend_extras, not be silently lost");
+        // The real "earliest_seq" is untouched by the typo key — it keeps its default.
+        // (validate_lenient only enforces floor ≥ 1 when the field was explicitly set below 1.)
+        let NodeDbConfig { earliest_seq, .. } = NodeDbConfig::default();
+        assert_eq!(db.earliest_seq, earliest_seq,
+            "typo key must not affect the real earliest_seq field");
+    }
+
+    // ---- F18: [transaction_queue] lenient clamping ----
+
+    #[test]
+    fn txq_normal_consensus_increase_above_1000_clamped() {
+        // 1001 exceeds the C++ ceiling of 1000 — must be silently clamped to 1000 in INI mode.
+        let cfg = parse("[transaction_queue]\nnormal_consensus_increase_percent=1001\n");
+        assert_eq!(cfg.parsed.transaction_queue.normal_consensus_increase_percent, 1000);
+    }
+
+    #[test]
+    fn txq_slow_consensus_decrease_above_100_clamped() {
+        // 200 exceeds the C++ ceiling of 100 — must be silently clamped to 100 in INI mode.
+        let cfg = parse("[transaction_queue]\nslow_consensus_decrease_percent=200\n");
+        assert_eq!(cfg.parsed.transaction_queue.slow_consensus_decrease_percent, 100);
+    }
+
+    #[test]
+    fn txq_percent_fields_in_range_unchanged() {
+        // Values within valid range must pass through unmodified.
+        let cfg = parse(
+            "[transaction_queue]\nnormal_consensus_increase_percent=500\nslow_consensus_decrease_percent=75\n",
+        );
+        assert_eq!(cfg.parsed.transaction_queue.normal_consensus_increase_percent, 500);
+        assert_eq!(cfg.parsed.transaction_queue.slow_consensus_decrease_percent, 75);
+    }
+
+    // ---- F38: [crawl] mixed kv + bare lines ----
+
+    /// When `[crawl]` has both kv pairs and bare values, the kv path wins (Detailed)
+    /// and the bare value is silently dropped — matching C++ behavior where
+    /// `lookup_["overlay"]` takes precedence over `values_=["true"]`.
+    #[test]
+    fn crawl_mixed_kv_and_bare_kv_wins() {
+        let cfg = parse("[crawl]\ntrue\noverlay=1\n");
+        // has_kv = true → Detailed path; bare "true" is discarded.
+        assert_eq!(
+            cfg.crawl(),
+            &CrawlConfig::Detailed { overlay: true, server: false, counts: false, unl: false },
+        );
+    }
+
+    #[test]
+    fn crawl_mixed_bare_then_kv() {
+        // Order shouldn't matter — presence of any kv line forces Detailed.
+        let cfg = parse("[crawl]\nserver=1\ntrue\n");
+        assert_eq!(
+            cfg.crawl(),
+            &CrawlConfig::Detailed { overlay: false, server: true, counts: false, unl: false },
+        );
     }
 }

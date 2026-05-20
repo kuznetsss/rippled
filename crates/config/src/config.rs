@@ -17,6 +17,9 @@ use crate::types::*;
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct Parsed {
+    /// Which format produced this `Parsed`. Used by bootstrap to enforce format-specific
+    /// rules (e.g. validators-file overlap is a TOML error, silent in INI).
+    pub(crate) source_format: crate::error::Format,
     // ---- top-level scalars ----
     pub(crate) network_id: u32,
     pub(crate) network_quorum: u64,
@@ -94,7 +97,6 @@ pub(crate) struct Parsed {
     pub(crate) reduce_relay: ReduceRelayConfig,
     pub(crate) crawl: CrawlConfig,
     pub(crate) vl: VlConfig,
-    pub(crate) voting_config: VotingConfig,
     pub(crate) transaction_queue: TxQConfig,
     pub(crate) insight: InsightConfig,
     pub(crate) perf: PerfConfig,
@@ -104,6 +106,7 @@ pub(crate) struct Parsed {
 impl Default for Parsed {
     fn default() -> Self {
         Parsed {
+            source_format: crate::error::Format::Ini,
             network_id: 0,
             network_quorum: 1,
             peer_private: false,
@@ -164,7 +167,6 @@ impl Default for Parsed {
             reduce_relay: ReduceRelayConfig::default(),
             crawl: CrawlConfig::default(),
             vl: VlConfig::default(),
-            voting_config: VotingConfig::default(),
             transaction_queue: TxQConfig::default(),
             insight: InsightConfig::default(),
             perf: PerfConfig::default(),
@@ -267,6 +269,10 @@ impl Config {
     /// Load and parse a file. Format chosen by extension (`.toml` → TOML, else INI).
     /// Sets `overrides.config_dir` to `path.parent()` so `bootstrap()` can resolve
     /// relative paths. Does NOT run `bootstrap()` — caller does that.
+    ///
+    /// Note: any prior `set_config_dir` call is unconditionally overwritten with
+    /// `path.parent()`.  This is by design — `from_file` is a fresh constructor,
+    /// not an incremental builder.
     pub fn from_file(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| ConfigError::io(path.to_owned(), e))?;
@@ -307,6 +313,12 @@ impl Config {
         self.overrides.quiet = Some(v);
     }
 
+    /// Set the silent flag.
+    ///
+    /// `set_silent(true)` also sets the quiet flag (silent implies quiet).
+    /// `set_silent(false)` clears the silent flag but does **not** clear a separately
+    /// set quiet flag — the two are independent once the silent→quiet bridge has fired.
+    /// Use `set_quiet(false)` explicitly to clear quiet independently.
     pub fn set_silent(&mut self, v: bool) {
         self.overrides.silent = Some(v);
         if v {
@@ -390,10 +402,11 @@ impl Config {
         self.parsed.network_id
     }
 
+    /// Returns the network_quorum value from the config file.
+    /// This is the file-only value (`[network_quorum]` section).
+    /// The CLI `--quorum` override is accessible via `validation_quorum()`.
     pub fn network_quorum(&self) -> u64 {
-        self.overrides
-            .validation_quorum
-            .unwrap_or(self.parsed.network_quorum)
+        self.parsed.network_quorum
     }
 
     pub fn peer_private(&self) -> bool {
@@ -548,6 +561,11 @@ impl Config {
         self.parsed.server_domain.as_deref()
     }
 
+    /// Returns the set of enabled feature names from `[features]`.
+    ///
+    /// **Invariant:** feature names are raw strings; validation against the registered
+    /// feature list is a Phase 3 concern handled by the downstream C++ consumer.
+    /// Unknown feature names *do* survive parse — callers are responsible for rejecting them.
     pub fn features(&self) -> &HashSet<FeatureName> {
         &self.parsed.features
     }
@@ -602,8 +620,12 @@ impl Config {
         self.overrides.forced_ledger_range
     }
 
-    pub fn validation_quorum(&self) -> u64 {
-        self.overrides.validation_quorum.unwrap_or(self.parsed.network_quorum)
+    /// Returns the CLI `--quorum` override if set, otherwise `None`.
+    /// This is distinct from `network_quorum()` which returns the file-configured value.
+    /// Callers that need the effective quorum should use this override when `Some`, and
+    /// fall back to `network_quorum()` when `None`.
+    pub fn validation_quorum(&self) -> Option<u64> {
+        self.overrides.validation_quorum
     }
 
     pub fn rpc_ip(&self) -> Option<std::net::SocketAddr> {
@@ -614,8 +636,10 @@ impl Config {
         self.overrides.force_multi_thread.unwrap_or(false)
     }
 
+    /// Returns true if quiet mode is active.
+    /// Silent mode implies quiet: `silent() || quiet_override`.
     pub fn quiet(&self) -> bool {
-        self.overrides.quiet.unwrap_or(false)
+        self.silent() || self.overrides.quiet.unwrap_or(false)
     }
 
     pub fn silent(&self) -> bool {
@@ -666,6 +690,11 @@ impl Config {
 
     /// Returns the merged voting config.
     /// `[fee_default]` overrides `voting.reference_fee` (design §9).
+    ///
+    /// Returns by value because the merge of two distinct parsed fields
+    /// (`voting` + `fee_default`) requires a temporary copy.  The cost is negligible
+    /// for a startup-time read.  A future optimisation may cache the merged value in
+    /// `Finalized` and return `&VotingConfig` instead.
     pub fn voting(&self) -> VotingConfig {
         let mut v = self.parsed.voting.clone();
         if let Some(f) = self.parsed.fee_default {
@@ -881,9 +910,10 @@ mod tests {
     fn config_validation_quorum_override() {
         let mut cfg = Config::from_ini_str("").unwrap();
         cfg.set_validation_quorum(7);
-        assert_eq!(cfg.validation_quorum(), 7);
-        // network_quorum getter also respects the validation_quorum override
-        assert_eq!(cfg.network_quorum(), 7);
+        // validation_quorum returns the CLI override as Option<u64>
+        assert_eq!(cfg.validation_quorum(), Some(7));
+        // network_quorum returns the file value (default 1, not the CLI override)
+        assert_eq!(cfg.network_quorum(), 1);
     }
 
     #[test]

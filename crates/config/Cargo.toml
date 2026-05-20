@@ -10,12 +10,8 @@ crate-type = ["staticlib", "rlib"]
 cxx.workspace = true
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-regex = "1"
 thiserror = "1"
 serde_json = "1"
 ipnet = { version = "2", features = ["serde"] }
 hex = "0.4"
 libc = "0.2"
-
-[dev-dependencies]
-tempfile = "3"

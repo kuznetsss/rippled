@@ -23,8 +23,15 @@ use super::raw::{RawLineKind, RawSection};
 // ---------------------------------------------------------------------------
 
 /// Deserialize a struct `T` from the key-value pairs in `raw`.
-/// Missing fields use their `Default` (requires `#[serde(default)]` on the struct).
-/// Unknown keys are silently ignored.
+///
+/// **Assumption:** the target struct must derive `Deserialize` *and* carry
+/// `#[serde(default)]` at the struct level.  Without it, any key absent from
+/// the INI section will produce a "missing field" serde error rather than using
+/// the field's `Default`.  Every kv struct in `crates/config/src/types/` honours
+/// this contract — future additions must too.
+///
+/// Unknown keys are silently ignored (lenient INI mode).
+/// Missing keys fall back to field defaults.
 pub(super) fn from_kv_section<T: DeserializeOwned>(raw: &RawSection) -> Result<T, ConfigError> {
     let de = KvDeserializer::new(raw);
     T::deserialize(de)

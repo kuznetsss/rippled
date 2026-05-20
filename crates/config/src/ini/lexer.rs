@@ -39,15 +39,19 @@ pub(super) fn tokenize(text: &str) -> Result<RawSections, ConfigError> {
         }
 
         // Step 5: section headers.
+        // Section names are stored verbatim (case-sensitive per design §7 #4 / analysis §6.9).
+        // Two headers with the same exact name concatenate; differently-cased headers
+        // are treated as distinct sections and will fall through to the silent-drop arm
+        // of dispatch_section, matching C++ BasicConfig behavior.
         if let Some(header_content) = try_parse_header(trimmed) {
-            let name_lower = header_content.to_lowercase();
-            // Find an existing section with this name (step 7: concatenate).
-            if let Some(existing) = result.sections.iter().position(|s| s.name == name_lower) {
+            let name = header_content.to_owned();
+            // Find an existing section with this exact name (step 7: concatenate).
+            if let Some(existing) = result.sections.iter().position(|s| s.name == name) {
                 current_idx = Some(existing);
             } else {
                 current_idx = Some(result.sections.len());
                 result.sections.push(RawSection {
-                    name: name_lower,
+                    name,
                     lines: Vec::new(),
                     span,
                 });
@@ -90,13 +94,19 @@ pub(super) fn tokenize(text: &str) -> Result<RawSections, ConfigError> {
 }
 
 /// If the trimmed line is a `[name]` header, return the name (without brackets).
-/// We require the closing `]` to be present (design §5 rule 5).
+///
+/// Matching C++ `parseIniFile` behavior (Config.cpp:195): the closing `]` must be
+/// the **last character** of the trimmed line.  Anything after `]` (e.g. `[foo] bar`)
+/// makes the line NOT a section header — it falls through to the bare-value path.
 fn try_parse_header(trimmed: &str) -> Option<&str> {
     if !trimmed.starts_with('[') {
         return None;
     }
-    let close = trimmed.find(']')?;
-    let name = trimmed[1..close].trim();
+    // Require the line to end with `]` (no trailing content after the bracket).
+    if !trimmed.ends_with(']') {
+        return None;
+    }
+    let name = trimmed[1..trimmed.len() - 1].trim();
     if name.is_empty() {
         return None;
     }
@@ -258,8 +268,18 @@ mod tests {
     }
 
     #[test]
-    fn section_header_case_insensitive() {
+    fn section_header_case_sensitive() {
+        // Section names are stored verbatim (case-sensitive per design §7 #4).
+        // A mis-cased [Overlay] is a distinct section from [overlay]; it will
+        // fall through to the silent-drop arm in the adapter.
         let rs = lex("[Overlay]\nmax_unknown_time=600\n");
+        assert_eq!(rs.sections[0].name, "Overlay");
+    }
+
+    #[test]
+    fn section_header_lowercase_matches_dispatch() {
+        // Canonical lowercase section names work as expected.
+        let rs = lex("[overlay]\nmax_unknown_time=600\n");
         assert_eq!(rs.sections[0].name, "overlay");
     }
 
@@ -360,11 +380,15 @@ mod tests {
     }
 
     #[test]
-    fn section_header_with_trailing_content() {
-        // "[name] extra" — the find(']') is first ] so name is still parsed correctly
+    fn section_header_with_trailing_content_is_not_a_header() {
+        // "[name] extra" does NOT end with ']', so it is NOT a section header per C++ behavior.
+        // It becomes a bare value in the current section (or preamble if there is none).
         let rs = lex("[overlay] some extra\nfoo=1\n");
-        // try_parse_header finds first ], name is "overlay"
-        assert_eq!(rs.sections[0].name, "overlay");
+        // No section header was parsed — everything goes into preamble.
+        assert_eq!(rs.sections.len(), 1);
+        assert_eq!(rs.sections[0].name, "__preamble__");
+        // Both lines become bare values in preamble.
+        assert_eq!(rs.sections[0].lines.len(), 2);
     }
 
     #[test]
@@ -519,5 +543,55 @@ mod tests {
     fn only_comments_and_blanks_produces_no_sections() {
         let rs = lex("# comment\n\n# another\n   \n");
         assert_eq!(rs.sections.len(), 0);
+    }
+
+    // ---- F25: additional \# escape coverage ----
+
+    #[test]
+    fn double_backslash_before_hash_in_kv() {
+        // `\\#` — the `\` before `#` is not an escape because the `\` itself is not `\#`.
+        // strip_trailing_comment stops at the `#` because `bytes[i-1] == b'\\'` — it
+        // considers the `\` an escape, so the `#` is kept. The `\\` becomes the
+        // raw content. This is the actual behavior: `\\` is not a recognized double-escape.
+        let rs = lex("[test]\nfoo=bar\\\\#comment\n");
+        // The `\` before `#` causes the `#` to be treated as escaped (kept).
+        // Result: "bar\\" with had_trailing_comment=false.
+        // (The second `\` escapes the `#`, leaving `bar\` in the content.)
+        let sec = &rs.sections[0];
+        // Value should not have the comment stripped — the `\#` escape was triggered.
+        // Exact value depends on unescape_hash: `bar\\` stays (no `\#` to unescape).
+        assert!(matches!(&sec.lines[0].kind, RawLineKind::KeyValue { value, .. } if value.starts_with("bar")));
+    }
+
+    #[test]
+    fn multiple_escaped_hashes_in_value() {
+        // `foo=a\#b\#c` — both `\#` sequences become `#`.
+        let rs = lex("[test]\nfoo=a\\#b\\#c\n");
+        let sec = &rs.sections[0];
+        assert!(matches!(&sec.lines[0].kind,
+            RawLineKind::KeyValue { value, .. } if value == "a#b#c"));
+        assert!(!sec.lines[0].had_trailing_comment);
+    }
+
+    #[test]
+    fn escaped_hash_at_end_of_value() {
+        // `foo=bar\#` — the `\#` at end-of-line becomes `#`; no comment stripped.
+        let rs = lex("[test]\nfoo=bar\\#\n");
+        let sec = &rs.sections[0];
+        assert!(matches!(&sec.lines[0].kind,
+            RawLineKind::KeyValue { value, .. } if value == "bar#"));
+        assert!(!sec.lines[0].had_trailing_comment);
+    }
+
+    #[test]
+    fn escaped_hash_then_real_comment_in_bare_value() {
+        // `val\# kept # dropped`
+        let rs = lex("[test]\nval\\# kept # dropped\n");
+        let sec = &rs.sections[0];
+        // strip_trailing_comment: first `#` at position of `\#` is escaped (skipped),
+        // second `#` starts the real comment.
+        assert!(matches!(&sec.lines[0].kind,
+            RawLineKind::BareValue(v) if v == "val# kept"));
+        assert!(sec.lines[0].had_trailing_comment);
     }
 }
