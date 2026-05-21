@@ -17,8 +17,13 @@ corrosion_import_crate(MANIFEST_PATH ${CMAKE_CURRENT_SOURCE_DIR}/Cargo.toml)
 # etc.). Build this before running clang-tidy so generated headers are present.
 add_custom_target(xrpl_crates)
 
+# Interface library that exposes all crate cxxbridge targets to consumers. Link
+# against this instead of individual <name>_cxxbridge targets.
+add_library(xrpl_crates_cxxbridge INTERFACE)
+
 # add_xrpl_crate(<name> CRATE <crate> FILES <file>...) Creates a cxxbridge
-# target <name>_cxxbridge and registers it with xrpl_crates.
+# target <name>_cxxbridge and registers it with xrpl_crates and
+# xrpl_crates_cxxbridge.
 function(add_xrpl_crate name)
     cmake_parse_arguments(ARG "" "CRATE" "FILES" ${ARGN})
     corrosion_add_cxxbridge(${name}_cxxbridge CRATE ${ARG_CRATE} FILES
@@ -29,6 +34,7 @@ function(add_xrpl_crate name)
     # existence check — build-time ordering is enforced by the custom commands.
     set_target_properties(${name}_cxxbridge PROPERTIES INTERFACE_SOURCES "")
     add_dependencies(xrpl_crates ${name}_cxxbridge)
+    target_link_libraries(xrpl_crates_cxxbridge INTERFACE ${name}_cxxbridge)
 endfunction()
 
-add_xrpl_crate(rs_hello_world CRATE rs_hello_world FILES lib.rs)
+add_xrpl_crate(rs_config CRATE config FILES lib.rs)
