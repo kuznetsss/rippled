@@ -601,3 +601,198 @@ helpers):
 * `Config::loadFromString` is publicly callable for in-memory configs — the
   Rust loader should expose an equivalent entry point that bypasses the
   filesystem search.
+
+---
+
+## 7. Planned TOML mapping
+
+This section describes how the legacy INI layout maps onto the TOML schema
+used by the Rust loader. The goal is a single canonical form for new users,
+with the INI reader translating into the same in-memory `Config` struct.
+
+### 7.1. General rules
+
+1. **Pure value-line sections** (no `=` lines, e.g. `[ips]`, `[validators]`,
+   `[features]`, `[validator_list_sites]`, `[validator_list_keys]`,
+   `[amendments]`, `[veto_amendments]`, `[cluster_nodes]`, `[rpc_startup]`)
+   collapse to **top-level array keys**: `ips = [...]`, `validators = [...]`,
+   etc.
+2. **Single-value sections** (one informational line, no `=`, e.g.
+   `[debug_logfile]`, `[node_seed]`, `[validation_seed]`,
+   `[validator_token]`, `[validator_key_revocation]`,
+   `[validators_file]`, `[server_domain]`, `[network_id]`,
+   `[network_quorum]`, `[node_size]`, `[ledger_history]`, `[fetch_depth]`,
+   `[fee_default]`, `[workers]`, `[io_workers]`, `[prefetch_workers]`,
+   `[max_transactions]`, `[sweep_interval]`, `[amendment_majority_time]`,
+   `[ssl_verify]`, `[ssl_verify_file]`, `[ssl_verify_dir]`,
+   `[validator_list_threshold]`, `[peer_private]`, `[peers_max]`,
+   `[peers_in_max]`, `[peers_out_max]`, `[signing_support]`,
+   `[elb_support]`, `[compression]`, `[ledger_replay]`, `[beta_rpc_api]`,
+   `[database_path]`, `[path_search]`, `[path_search_old]`,
+   `[path_search_fast]`, `[path_search_max]`) collapse to **top-level scalar
+   keys**: `debug_logfile = "..."`, `network_quorum = 3`, etc.
+3. **Key/value-only sections** (`[overlay]`, `[voting]`, `[sqlite]`,
+   `[node_db]`, `[import_db]`, `[insight]`, `[perf]`, `[transaction_queue]`,
+   `[reduce_relay]`, `[hashrouter]`, `[ledger_tx_tables]`, `[sqdb]`,
+   `[vl]`) stay as **TOML tables** with the same names.
+4. **Comma-separated lists** inside scalar values (port `protocol`,
+   `admin`, `secure_gateway`) become **TOML arrays**.
+5. **Booleans** unify on TOML `true`/`false`. The INI reader maps both
+   legacy dialects (`lexicalCastThrow<bool>` and the int-coerced
+   `getIfExists<bool>` variant) onto this single form.
+6. **Comments** use TOML's native `#`; the `\#` escape and trailing-comment
+   warning are INI-only concerns.
+
+### 7.2. Mapping table (illustrative)
+
+| Legacy form                          | TOML form                                              |
+| ------------------------------------ | ------------------------------------------------------ |
+| `[ips]\nr.ripple.com 51235`          | `ips = ["r.ripple.com 51235"]`                         |
+| `[validators]\nn949...`              | `validators = ["n949..."]`                             |
+| `[debug_logfile]\ndebug.log`         | `debug_logfile = "debug.log"`                          |
+| `[network_quorum]\n3`                | `network_quorum = 3`                                   |
+| `[ledger_history]\nfull`             | `ledger_history = "full"`        (string-or-int)       |
+| `[node_size]\nhuge`                  | `node_size = "huge"`             (string-or-int)       |
+| `[network_id]\nmain`                 | `network_id = "main"`            (string-or-int)       |
+| `[amendment_majority_time]\n15 days` | `amendment_majority_time = "15 days"`                  |
+| `[overlay]\nip_limit = 50`           | `[overlay]\nip_limit = 50`                             |
+| `protocol = http,https,peer`         | `protocol = ["http", "https", "peer"]`                 |
+| `admin = 127.0.0.1,::1`              | `admin = ["127.0.0.1", "::1"]`                         |
+| `[rpc_startup]\n{ "command": ... }`  | `rpc_startup = [{ command = "..." }]`  (see §7.4 #5)   |
+
+### 7.3. Mixed / unusual sections
+
+The cases below do not fit the simple rules above and need explicit shapes.
+
+#### 7.3.1. `[server]` and per-port sections
+
+The legacy `[server]` mixes a list of port-section names with shared
+key/value defaults inherited by each named section. The TOML shape:
+
+```toml
+[server]
+# Shared defaults applied to every port unless overridden.
+# (limit, send_queue_limit, ssl_*, permessage_deflate, ...)
+
+[server.ports.port_peer]
+ip = "0.0.0.0"
+port = 51235
+protocol = ["peer"]
+
+[server.ports.port_rpc_admin_local]
+ip = "127.0.0.1"
+port = 5005
+protocol = ["http"]
+admin = ["127.0.0.1"]
+
+[server.ports.port_ws_admin_local]
+ip = "127.0.0.1"
+port = 6006
+protocol = ["ws"]
+send_queue_limit = 500
+```
+
+Notes:
+
+* The legacy `[server]` value-lines (port names) become the **keys** of the
+  `[server.ports]` table; the value-list is implicit.
+* Defaults flow from `[server]` to `[server.ports.<name>]` at load time.
+* `[port_grpc]` is hoisted out into its own top-level `[grpc]` table because
+  it's parsed by a different consumer (`GRPCServer`) and never used as a
+  generic listener.
+
+#### 7.3.2. `[crawl]`
+
+The legacy form mixes one optional value-line flag with four named keys.
+Collapse into a single table:
+
+```toml
+[crawl]
+enabled = true   # replaces the bare "0|1" value line
+overlay = true
+server  = true
+counts  = false
+unl     = true
+```
+
+#### 7.3.3. Validators file
+
+`validators_file = "..."` keeps its current semantics: when set, the named
+file is loaded and its top-level keys are merged into the main config. The
+external file must be **in the same format as the root config** — a TOML
+root config requires a TOML validators file; the legacy INI loader continues
+to accept INI files. Inline use (defining `validators`,
+`validator_list_*` directly in the main file) is also fully supported.
+
+#### 7.3.4. Polymorphic scalars
+
+Several keys accept either a numeric value or a named alias. The Rust
+loader treats these as untagged enums:
+
+| Key                                  | Accepted forms                                                   |
+| ------------------------------------ | ---------------------------------------------------------------- |
+| `ledger_history`                     | int, `"full"`, `"none"`                                          |
+| `fetch_depth`                        | int, `"full"`, `"none"`                                          |
+| `network_id`                         | int (0..4294967295), `"main"`, `"testnet"`, `"devnet"`           |
+| `node_size`                          | int 0..4, `"tiny"`, `"small"`, `"medium"`, `"large"`, `"huge"`   |
+| `server.ports.<name>.limit`          | int, `"unlimited"`                                               |
+
+#### 7.3.5. `node_db` / `import_db` tagged variants
+
+`type = "NuDB"` enables `nudb_block_size`; `type = "RocksDB"` enables
+`cache_mb` and `filter_bits`. The Rust loader expresses this as a
+serde-tagged enum so unrelated keys are rejected at deserialization:
+
+```toml
+[node_db]
+type = "NuDB"            # or "RocksDB"
+path = "/var/lib/xrpld/db/nudb"
+online_delete = 512
+nudb_block_size = 4096   # NuDB only
+# cache_mb = 256         # RocksDB only
+```
+
+#### 7.3.6. `rpc_startup` entries
+
+Each entry is a JSON document passed verbatim to `RPC::doCommand`. TOML
+represents this as an array of strings; the loader does not impose any
+schema, matching the current C++ behavior where `Application::setup`
+parses each line with `json::Reader` at startup:
+
+```toml
+rpc_startup = [
+    '{ "command": "log_level", "severity": "warning" }',
+    '{ "command": "log_level", "partition": "ripplecalc", "severity": "trace" }',
+]
+```
+
+Validation of the JSON payload (and dispatch to the RPC handler) happens
+at runtime, not at config load.
+
+#### 7.3.7. Multi-line `validator_token`
+
+In the legacy INI, the token is split across many lines (visual wrapping)
+and reassembled by `loadValidatorToken`. In TOML it is a single string —
+multi-line strings (`"""..."""`) are supported by the TOML parser and
+should be allowed. The INI reader retains the line-joining behavior for
+back-compat.
+
+#### 7.3.8. Duration strings
+
+`amendment_majority_time = "15 minutes"` stays a string and is parsed by
+the same `<n> <unit>` rule the C++ code uses (`minutes|hours|days|weeks`,
+minimum 15 minutes).
+
+### 7.4. Resolved decisions
+
+| # | Topic                       | Decision                                                                                                                                                                                                                                                       |
+| - | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 | `[server]` shape            | Nested tables: `[server]` for shared defaults, `[server.ports.<name>]` per port (§7.3.1).                                                                                                                                                                       |
+| 2 | Enum value case             | **TOML: case-sensitive, canonical form only** (`"NuDB"`, `"wal"`, `"huge"`, etc.). The INI reader keeps `boost::iequals`-style case-insensitive matching for back-compat — handled when wiring the INI deserializer.                                            |
+| 3 | Polymorphic scalars (§7.3.4)| Keep string aliases **and** accept numeric forms. Modeled as a serde untagged enum so users can write `ledger_history = "full"` or `ledger_history = 256`.                                                                                                      |
+| 4 | `rpc_startup` (§7.3.6)      | Array of JSON strings. No inline-table form. Preserves the existing C++ semantics where each entry is parsed at runtime.                                                                                                                                       |
+| 5 | Auto-derived defaults       | When auto-detection is the **only** valid behavior, the key is omitted from the TOML schema entirely (`Option<T>` in Rust, absent ⇒ auto). When the key accepts both auto and an explicit value, the auto path is the default and `"auto"` is reserved for the explicit form. |
+| 6 | Validators file format      | Must match the root config format. TOML root ⇒ TOML validators file; INI root ⇒ INI validators file. The loader rejects format mismatches.                                                                                                                     |
+| 7 | Mutex pairs                 | Validated post-deserialize. Mutex pairs (`validation_seed`/`validator_token`, `peers_max` vs `peers_in_max`+`peers_out_max`, `sqlite.safety_level` vs explicit pragmas, `reduce_relay.vp_base_squelch_enable` vs `vp_enable`) reuse the diagnostic strings from the C++ implementation. |
+| 8 | Unknown keys                | **Hard error** on unknown top-level keys (catches typos at startup). Legacy reserved names (`sntp_servers`, `websocket_ping_frequency`, `relational_db`) are explicitly allowlisted in the schema as no-op fields if back-compat is required by ops teams.      |
+| 9 | `[vl]` key name             | TOML uses `enabled` (matches the code). The INI reader accepts `enable` as a back-compat alias.                                                                                                                                                                |
