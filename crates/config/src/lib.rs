@@ -1,3 +1,5 @@
+pub mod schema;
+
 #[cxx::bridge(namespace = "rs::config")]
 mod ffi {
     extern "Rust" {

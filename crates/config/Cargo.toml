@@ -5,6 +5,10 @@ edition.workspace = true
 
 [dependencies]
 cxx.workspace = true
+serde = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+toml = "0.8"
 
 [lib]
 crate-type = ["staticlib", "rlib"]
