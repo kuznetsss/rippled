@@ -1,9 +1,10 @@
 //! `[crawl]` and `[vl]` tables — small tables that don't justify their own file.
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
 /// `[crawl]`. Replaces the legacy bare `0|1` value line with `enabled`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Crawl {
     /// Master switch. Default `true`.
@@ -20,7 +21,7 @@ pub struct Crawl {
 
 /// `[vl]`. TOML uses `enabled` (the INI loader accepts `enable` as an alias,
 /// but that is not exposed here).
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Vl {
     pub enabled: Option<bool>,

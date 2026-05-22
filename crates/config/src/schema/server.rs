@@ -8,9 +8,10 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Server {
     /// Shared defaults applied to every port unless overridden.
@@ -18,16 +19,28 @@ pub struct Server {
     pub defaults: PortConfig,
 
     /// Per-port sections, keyed by section name (e.g. `port_peer`).
+    // FFI (phase 2): map flattening — planned shape is `Vec<NamedPort>` where
+    // `NamedPort { name: String, config: Box<PortConfig> }`. Planned getters:
+    // `Server::port_names()` returning `&[String]` and `Server::port(name)`
+    // returning `Result<&PortConfig>`.
     #[serde(default)]
+    #[config_entry(skip)]
     pub ports: BTreeMap<String, PortConfig>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct PortConfig {
     pub ip: Option<String>,
     pub port: Option<u16>,
+    // FFI (phase 2): `Vec<Protocol>` — needs a cxx-shared `Protocol` enum
+    // (Http|Https|Ws|Wss|Peer). Planned: `PortConfig::protocols()` returning
+    // `&[Protocol]` (empty when absent, like other `Option<Vec<…>>` fields).
+    #[config_entry(skip)]
     pub protocol: Option<Vec<Protocol>>,
+    // FFI (phase 2): polymorphic — `PortLimit` is `"unlimited" | u16`. Planned:
+    // `PortConfig::limit_kind()` + `limit_value()` (kind = Unlimited|Numeric).
+    #[config_entry(skip)]
     pub limit: Option<PortLimit>,
     pub send_queue_limit: Option<u16>,
 

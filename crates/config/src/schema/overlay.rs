@@ -1,8 +1,9 @@
 //! `[overlay]` table.
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Overlay {
     /// Publicly reachable IP. Must not be a private address.

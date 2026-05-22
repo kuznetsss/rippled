@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
 /// `[node_db]` / `[import_db]` — common shape, tagged by backend `type`.
@@ -63,14 +64,26 @@ pub struct RocksDbOptions {
 }
 
 /// `[sqlite]` table.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Sqlite {
     /// `"high"` or `"low"`. Cannot coexist with `journal_mode`,
     /// `synchronous`, or `temp_store` (validated post-deserialize).
+    // FFI (phase 2): data-less enum — cxx-shared `SafetyLevel` + `OptionalSafetyLevel`.
+    // Planned: `Sqlite::safety_level()` returning `OptionalSafetyLevel`.
+    #[config_entry(skip)]
     pub safety_level: Option<SafetyLevel>,
+    // FFI (phase 2): cxx-shared `JournalMode` (Delete|Truncate|Persist|Memory|Wal|Off).
+    // Planned: `Sqlite::journal_mode()` returning `OptionalJournalMode`.
+    #[config_entry(skip)]
     pub journal_mode: Option<JournalMode>,
+    // FFI (phase 2): cxx-shared `Synchronous` (Off|Normal|Full|Extra).
+    // Planned: `Sqlite::synchronous()` returning `OptionalSynchronous`.
+    #[config_entry(skip)]
     pub synchronous: Option<Synchronous>,
+    // FFI (phase 2): cxx-shared `TempStore` (Default|File|Memory).
+    // Planned: `Sqlite::temp_store()` returning `OptionalTempStore`.
+    #[config_entry(skip)]
     pub temp_store: Option<TempStore>,
     /// Power of two in `[512, 65536]`. Default `4096`.
     pub page_size: Option<u32>,
@@ -114,10 +127,13 @@ pub enum TempStore {
 }
 
 /// `[sqdb]` — SOCI backend selector.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Sqdb {
     /// Only `"sqlite"` is accepted.
+    // FFI (phase 2): cxx-shared `SqdbBackend` (Sqlite).
+    // Planned: `Sqdb::backend()` returning `OptionalSqdbBackend`.
+    #[config_entry(skip)]
     pub backend: Option<SqdbBackend>,
 }
 
@@ -128,7 +144,7 @@ pub enum SqdbBackend {
 }
 
 /// `[ledger_tx_tables]`.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct LedgerTxTables {
     /// Default `true`.

@@ -1,8 +1,9 @@
 //! `[reduce_relay]` table.
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct ReduceRelay {
     /// Mutually exclusive with [`Self::vp_enable`].

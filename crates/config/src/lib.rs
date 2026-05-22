@@ -1,4 +1,5 @@
 pub mod error;
+pub mod ffi;
 pub mod schema;
 
 use std::fs;
@@ -6,11 +7,6 @@ use std::path::Path;
 
 pub use crate::error::ParseError;
 use crate::schema::Config;
-
-#[cxx::bridge(namespace = "rs::config")]
-mod ffi {
-    extern "Rust" {}
-}
 
 /// Parse a `Config` from an in-memory TOML document.
 pub fn parse_from_toml_str(s: &str) -> Result<Config, ParseError> {

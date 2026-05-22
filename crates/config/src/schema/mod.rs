@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
 pub mod database;
@@ -38,7 +39,7 @@ use voting::Voting;
 /// Top-level keys carry the values that the legacy INI loader stored in
 /// single-line or list-style sections; nested tables map one-to-one onto the
 /// INI sections they replace.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     // ----- List-style top-level keys (legacy value-line sections) -----
@@ -85,10 +86,24 @@ pub struct Config {
     pub validators_file: Option<PathBuf>,
     pub server_domain: Option<String>,
 
+    // FFI (phase 2): polymorphic — needs a `{ kind, value }` cxx-shared
+    // wrapper plus a `NetworkIdKind` enum (Main/Testnet/Devnet/Numeric).
+    // Planned manual getters: `has_network_id()`, `network_id_kind()`,
+    // `network_id_value()`.
+    #[config_entry(skip)]
     pub network_id: Option<NetworkId>,
     pub network_quorum: Option<u32>,
+    // FFI (phase 2): polymorphic — `NodeSizeKind` (Tiny/Small/Medium/Large/Huge/Numeric).
+    // Planned: `has_node_size()`, `node_size_kind()`, `node_size_value()`.
+    #[config_entry(skip)]
     pub node_size: Option<NodeSize>,
+    // FFI (phase 2): polymorphic — `LedgerHistoryKind` (Full/None/Numeric).
+    // Planned: `has_ledger_history()`, `ledger_history_kind()`, `ledger_history_value()`.
+    #[config_entry(skip)]
     pub ledger_history: Option<LedgerHistory>,
+    // FFI (phase 2): polymorphic — `FetchDepthKind` (Full/None/Numeric).
+    // Planned: `has_fetch_depth()`, `fetch_depth_kind()`, `fetch_depth_value()`.
+    #[config_entry(skip)]
     pub fetch_depth: Option<FetchDepth>,
 
     /// Drops. Overrides `voting.reference_fee` post-load when set.
@@ -136,7 +151,14 @@ pub struct Config {
     /// At most one line in the INI form; numeric `0` ⇒ auto.
     pub validator_list_threshold: Option<u32>,
 
+    // FFI (phase 2): data-less enum — needs a cxx-shared `RelayMode` enum
+    // (All/Trusted/DropUntrusted) plus an `OptionalRelayMode` wrapper.
+    // Planned manual getter: `relay_proposals()` returning `OptionalRelayMode`.
+    #[config_entry(skip)]
     pub relay_proposals: Option<RelayMode>,
+    // FFI (phase 2): same `RelayMode` enum reused.
+    // Planned: `relay_validations()` returning `OptionalRelayMode`.
+    #[config_entry(skip)]
     pub relay_validations: Option<RelayMode>,
 
     // ----- Nested tables -----
@@ -148,7 +170,16 @@ pub struct Config {
     pub transaction_queue: Option<TransactionQueue>,
     pub hashrouter: Option<HashRouter>,
 
+    // FFI (phase 2): internally-tagged enum (NuDB | RocksDB) with variant-
+    // specific fields. Flat shape will be `{ kind, common: NodeDbCommon,
+    // nudb_block_size, cache_mb, filter_bits }`.
+    // Planned: `has_node_db()` + a `node_db()` returning a hand-written
+    // `NodeDbView` opaque type whose getters expose the flat shape.
+    #[config_entry(skip)]
     pub node_db: Option<NodeDb>,
+    // FFI (phase 2): same shape as `node_db`. Planned: `has_import_db()` and
+    // `import_db()` returning the same `NodeDbView`.
+    #[config_entry(skip)]
     pub import_db: Option<NodeDb>,
     pub sqlite: Option<Sqlite>,
     pub sqdb: Option<Sqdb>,

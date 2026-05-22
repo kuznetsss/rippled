@@ -1,8 +1,9 @@
 //! `[transaction_queue]` table. EXPERIMENTAL upstream.
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct TransactionQueue {
     pub ledgers_in_queue: Option<u32>,

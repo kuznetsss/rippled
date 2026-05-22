@@ -59,9 +59,19 @@ dependencies = [
 name = "config"
 version = "0.1.0"
 dependencies = [
+ "config-derive",
  "cxx",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "config-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

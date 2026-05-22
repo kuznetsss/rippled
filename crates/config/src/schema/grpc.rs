@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Grpc {
     pub ip: Option<String>,

@@ -1,8 +1,9 @@
 //! `[voting]` table.
 
+use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Voting {
     /// Drops. Default `10`. Top-level `fee_default` overrides this post-load.
