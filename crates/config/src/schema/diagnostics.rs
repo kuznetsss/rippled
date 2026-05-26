@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
+use crate::ffi;
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
 #[serde(deny_unknown_fields)]
 pub struct Insight {
@@ -23,6 +25,75 @@ pub struct Insight {
 #[serde(rename_all = "lowercase")]
 pub enum InsightServer {
     Statsd,
+}
+
+// ---- FFI projection types ----
+
+impl From<InsightServer> for ffi::InsightServer {
+    fn from(v: InsightServer) -> ffi::InsightServer {
+        match v {
+            InsightServer::Statsd => ffi::InsightServer::Statsd,
+        }
+    }
+}
+
+pub struct OptionalInsightServer(Option<InsightServer>);
+
+impl From<Option<InsightServer>> for OptionalInsightServer {
+    fn from(v: Option<InsightServer>) -> Self {
+        Self(v)
+    }
+}
+
+impl OptionalInsightServer {
+    pub fn has_value(&self) -> bool {
+        self.0.is_some()
+    }
+
+    pub fn value(&self) -> Result<ffi::InsightServer, String> {
+        self.0
+            .map(Into::into)
+            .ok_or_else(|| "OptionalInsightServer has no value".into())
+    }
+}
+
+// ---- Inherent getters on schema types ----
+
+impl Insight {
+    pub fn server(&self) -> Box<OptionalInsightServer> {
+        Box::new(self.server.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::ffi::InsightServer;
+
+    fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
+        Box::new(crate::parse_from_toml_str(s).expect("parse succeeded"))
+    }
+
+    #[test]
+    fn insight_server_present_and_absent() {
+        let cfg = ok_outcome(
+            r#"
+                [insight]
+                server = "statsd"
+            "#,
+        );
+        assert!(matches!(
+            cfg.insight().unwrap().server().value().unwrap(),
+            InsightServer::Statsd
+        ));
+
+        let cfg = ok_outcome(
+            r#"
+                [insight]
+                prefix = "x"
+            "#,
+        );
+        assert!(!cfg.insight().unwrap().server().has_value());
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, ConfigEntries)]
