@@ -5,8 +5,8 @@
 //!
 //! | Field type                  | Generated getter signature                              |
 //! | --------------------------- | ------------------------------------------------------- |
-//! | `Option<u8/u16/u32/u64/i32/bool>` | `fn name(&self) -> <option_ns>::OptionalT`        |
-//! | `Option<String>` / `Option<PathBuf>` | `fn name(&self) -> <option_ns>::OptionalString` |
+//! | `Option<u8/u16/u32/u64/i32/bool>` | `fn name(&self) -> Box<<option_ns>::OptionalT>`   |
+//! | `Option<String>` / `Option<PathBuf>` | `fn name(&self) -> Box<<option_ns>::OptionalString>` |
 //! | `Vec<String>`               | `fn name(&self) -> &[String]`                           |
 //! | `Option<Vec<String>>`       | `fn name(&self) -> &[String]` (empty when `None`)       |
 //! | `Option<T>` (struct)        | `fn name(&self) -> Result<&T, String>` + `fn has_name(&self) -> bool` |
@@ -146,79 +146,48 @@ fn option_getter(name: &syn::Ident, inner: &Type, option_ns: &Path) -> syn::Resu
     let type_name = type_last_ident_string(inner);
     match type_name.as_deref() {
         Some("bool") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalBool {
-                match self.#name {
-                    Some(v) => #option_ns::OptionalBool { is_present: true, value: v },
-                    None => #option_ns::OptionalBool { is_present: false, value: false },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalBool> {
+                ::std::boxed::Box::new(self.#name.into())
             }
         }),
         Some("u8") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalU8 {
-                match self.#name {
-                    Some(v) => #option_ns::OptionalU8 { is_present: true, value: v },
-                    None => #option_ns::OptionalU8 { is_present: false, value: 0 },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalU8> {
+                ::std::boxed::Box::new(self.#name.into())
             }
         }),
         Some("u16") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalU16 {
-                match self.#name {
-                    Some(v) => #option_ns::OptionalU16 { is_present: true, value: v },
-                    None => #option_ns::OptionalU16 { is_present: false, value: 0 },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalU16> {
+                ::std::boxed::Box::new(self.#name.into())
             }
         }),
         Some("u32") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalU32 {
-                match self.#name {
-                    Some(v) => #option_ns::OptionalU32 { is_present: true, value: v },
-                    None => #option_ns::OptionalU32 { is_present: false, value: 0 },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalU32> {
+                ::std::boxed::Box::new(self.#name.into())
             }
         }),
         Some("u64") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalU64 {
-                match self.#name {
-                    Some(v) => #option_ns::OptionalU64 { is_present: true, value: v },
-                    None => #option_ns::OptionalU64 { is_present: false, value: 0 },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalU64> {
+                ::std::boxed::Box::new(self.#name.into())
             }
         }),
         Some("i32") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalI32 {
-                match self.#name {
-                    Some(v) => #option_ns::OptionalI32 { is_present: true, value: v },
-                    None => #option_ns::OptionalI32 { is_present: false, value: 0 },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalI32> {
+                ::std::boxed::Box::new(self.#name.into())
             }
         }),
         Some("String") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalString {
-                match &self.#name {
-                    Some(v) => #option_ns::OptionalString {
-                        is_present: true,
-                        value: v.clone(),
-                    },
-                    None => #option_ns::OptionalString {
-                        is_present: false,
-                        value: ::std::string::String::new(),
-                    },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalString> {
+                ::std::boxed::Box::new(self.#name.clone().into())
             }
         }),
         Some("PathBuf") => Ok(quote! {
-            pub fn #name(&self) -> #option_ns::OptionalString {
-                match &self.#name {
-                    Some(v) => #option_ns::OptionalString {
-                        is_present: true,
-                        value: v.to_string_lossy().into_owned(),
-                    },
-                    None => #option_ns::OptionalString {
-                        is_present: false,
-                        value: ::std::string::String::new(),
-                    },
-                }
+            pub fn #name(&self) -> ::std::boxed::Box<#option_ns::OptionalString> {
+                ::std::boxed::Box::new(
+                    self.#name
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .into(),
+                )
             }
         }),
         _ => {
