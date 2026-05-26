@@ -445,9 +445,7 @@ impl Sqdb {
 
 #[cfg(test)]
 mod tests {
-    use crate::ffi::{
-        JournalMode, NodeDbKind, SafetyLevel, SqdbBackend, Synchronous, TempStore,
-    };
+    use crate::ffi::{JournalMode, NodeDbKind, SafetyLevel, SqdbBackend, Synchronous, TempStore};
 
     fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
         Box::new(crate::parse_from_toml_str(s).expect("parse succeeded"))
@@ -635,10 +633,10 @@ mod tests {
             "#,
         );
         let db = cfg.node_db();
-        assert_eq!(db.fast_load().value().unwrap(), true);
+        assert!(db.fast_load().value().unwrap());
         assert_eq!(db.earliest_seq().value().unwrap(), 32570);
         assert_eq!(db.online_delete().value().unwrap(), 2000);
-        assert_eq!(db.advisory_delete().value().unwrap(), true);
+        assert!(db.advisory_delete().value().unwrap());
         assert_eq!(db.delete_batch().value().unwrap(), 100);
         assert_eq!(db.back_off_milliseconds().value().unwrap(), 200);
         assert_eq!(db.age_threshold_seconds().value().unwrap(), 60);

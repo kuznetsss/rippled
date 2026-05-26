@@ -8,7 +8,7 @@
 //!   and method signatures. The bridge is the C++-visible inventory; it resolves opaque
 //!   type names via `use crate::schema::...::OptionalT` imports above.
 //! - **Schema-side `OptionalT` wrappers** for enum and tagged types live next to their
-//!   schema definitions in `schema/{enums,database,diagnostics,server}.rs` and are
+//!   schema definitions n `schema/{enums,database,diagnostics,server}.rs` and are
 //!   re-imported here so the bridge can resolve them.
 //! - **Parse entry points** (`parse_from_toml_str`, `parse_from_ini_str`,
 //!   `parse_from_file`) and `ParseOutcome` complete the bridge surface.
@@ -42,6 +42,11 @@ use crate::schema::server::{OptionalPortLimit, PortConfig, Server};
 use crate::schema::transaction_queue::TransactionQueue;
 use crate::schema::voting::Voting;
 
+// cxx-bridge generates wrapper code that requires explicit lifetimes on
+// `unsafe fn` returning `Result<&'a T>` — elision causes a borrow-check
+// error ("'1 must outlive '2") inside the generated code. The explicit
+// lifetimes are therefore load-bearing and the lint is a false positive here.
+#[allow(clippy::needless_lifetimes)]
 #[cxx::bridge(namespace = "rs::config")]
 mod bridge {
     // ----- Shared cxx enums (mirror data-less schema enums) -----
