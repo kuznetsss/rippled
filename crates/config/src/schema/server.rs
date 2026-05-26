@@ -21,10 +21,7 @@ pub struct Server {
     pub defaults: PortConfig,
 
     /// Per-port sections, keyed by section name (e.g. `port_peer`).
-    // FFI (phase 2): map flattening — planned shape is `Vec<NamedPort>` where
-    // `NamedPort { name: String, config: Box<PortConfig> }`. Planned getters:
-    // `Server::port_names()` returning `&[String]` and `Server::port(name)`
-    // returning `Result<&PortConfig>`.
+    // FFI: `Server::port_names()` / `has_port()` / `port()` below.
     #[serde(default)]
     #[config_entry(skip)]
     pub ports: BTreeMap<String, PortConfig>,
@@ -35,13 +32,10 @@ pub struct Server {
 pub struct PortConfig {
     pub ip: Option<String>,
     pub port: Option<u16>,
-    // FFI (phase 2): `Vec<Protocol>` — needs a cxx-shared `Protocol` enum
-    // (Http|Https|Ws|Wss|Peer). Planned: `PortConfig::protocols()` returning
-    // `&[Protocol]` (empty when absent, like other `Option<Vec<…>>` fields).
+    // FFI: `PortConfig::protocols()` below (returns empty `Vec` when absent).
     #[config_entry(skip)]
     pub protocol: Option<Vec<Protocol>>,
-    // FFI (phase 2): polymorphic — `PortLimit` is `"unlimited" | u16`. Planned:
-    // `PortConfig::limit_kind()` + `limit_value()` (kind = Unlimited|Numeric).
+    // FFI: `PortConfig::limit()` below; returns `OptionalPortLimit`.
     #[config_entry(skip)]
     pub limit: Option<PortLimit>,
     pub send_queue_limit: Option<u16>,
@@ -94,6 +88,14 @@ pub enum PortLimitName {
     Unlimited,
 }
 
+impl From<PortLimitName> for ffi::PortLimitKind {
+    fn from(value: PortLimitName) -> Self {
+        match value {
+            PortLimitName::Unlimited => ffi::PortLimitKind::Unlimited,
+        }
+    }
+}
+
 // ---- FFI projection types ----
 //
 // These live next to the schema types they wrap, imported into `ffi.rs`'s
@@ -126,7 +128,7 @@ impl OptionalPortLimit {
 
     pub fn kind(&self) -> Result<ffi::PortLimitKind, String> {
         match self.0 {
-            Some(PortLimit::Named(PortLimitName::Unlimited)) => Ok(ffi::PortLimitKind::Unlimited),
+            Some(PortLimit::Named(name)) => Ok(name.into()),
             Some(PortLimit::Numeric(_)) => Ok(ffi::PortLimitKind::Numeric),
             None => Err("OptionalPortLimit has no value".into()),
         }

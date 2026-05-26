@@ -21,6 +21,15 @@ pub enum LedgerHistoryName {
     None,
 }
 
+impl From<LedgerHistoryName> for ffi::LedgerHistoryKind {
+    fn from(value: LedgerHistoryName) -> Self {
+        match value {
+            LedgerHistoryName::Full => ffi::LedgerHistoryKind::Full,
+            LedgerHistoryName::None => ffi::LedgerHistoryKind::None,
+        }
+    }
+}
+
 /// `fetch_depth`: integer count, or `"full"` / `"none"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -34,6 +43,15 @@ pub enum FetchDepth {
 pub enum FetchDepthName {
     Full,
     None,
+}
+
+impl From<FetchDepthName> for ffi::FetchDepthKind {
+    fn from(value: FetchDepthName) -> Self {
+        match value {
+            FetchDepthName::Full => ffi::FetchDepthKind::Full,
+            FetchDepthName::None => ffi::FetchDepthKind::None,
+        }
+    }
 }
 
 /// `network_id`: integer in `[0, u32::MAX]`, or one of the well-known names.
@@ -52,6 +70,16 @@ pub enum NetworkIdName {
     Devnet,
 }
 
+impl From<NetworkIdName> for ffi::NetworkIdKind {
+    fn from(value: NetworkIdName) -> Self {
+        match value {
+            NetworkIdName::Main => ffi::NetworkIdKind::Main,
+            NetworkIdName::Testnet => ffi::NetworkIdKind::Testnet,
+            NetworkIdName::Devnet => ffi::NetworkIdKind::Devnet,
+        }
+    }
+}
+
 /// `node_size`: integer in `0..=4`, or one of the named tiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -68,6 +96,18 @@ pub enum NodeSizeName {
     Medium,
     Large,
     Huge,
+}
+
+impl From<NodeSizeName> for ffi::NodeSizeKind {
+    fn from(value: NodeSizeName) -> Self {
+        match value {
+            NodeSizeName::Tiny => ffi::NodeSizeKind::Tiny,
+            NodeSizeName::Small => ffi::NodeSizeKind::Small,
+            NodeSizeName::Medium => ffi::NodeSizeKind::Medium,
+            NodeSizeName::Large => ffi::NodeSizeKind::Large,
+            NodeSizeName::Huge => ffi::NodeSizeKind::Huge,
+        }
+    }
 }
 
 /// `relay_proposals` / `relay_validations` policy.
@@ -129,8 +169,7 @@ impl OptionalLedgerHistory {
 
     pub fn kind(&self) -> Result<ffi::LedgerHistoryKind, String> {
         match self.0 {
-            Some(LedgerHistory::Named(LedgerHistoryName::Full)) => Ok(ffi::LedgerHistoryKind::Full),
-            Some(LedgerHistory::Named(LedgerHistoryName::None)) => Ok(ffi::LedgerHistoryKind::None),
+            Some(LedgerHistory::Named(name)) => Ok(name.into()),
             Some(LedgerHistory::Numeric(_)) => Ok(ffi::LedgerHistoryKind::Numeric),
             None => Err("OptionalLedgerHistory has no value".into()),
         }
@@ -160,8 +199,7 @@ impl OptionalFetchDepth {
 
     pub fn kind(&self) -> Result<ffi::FetchDepthKind, String> {
         match self.0 {
-            Some(FetchDepth::Named(FetchDepthName::Full)) => Ok(ffi::FetchDepthKind::Full),
-            Some(FetchDepth::Named(FetchDepthName::None)) => Ok(ffi::FetchDepthKind::None),
+            Some(FetchDepth::Named(name)) => Ok(name.into()),
             Some(FetchDepth::Numeric(_)) => Ok(ffi::FetchDepthKind::Numeric),
             None => Err("OptionalFetchDepth has no value".into()),
         }
@@ -191,9 +229,7 @@ impl OptionalNetworkId {
 
     pub fn kind(&self) -> Result<ffi::NetworkIdKind, String> {
         match self.0 {
-            Some(NetworkId::Named(NetworkIdName::Main)) => Ok(ffi::NetworkIdKind::Main),
-            Some(NetworkId::Named(NetworkIdName::Testnet)) => Ok(ffi::NetworkIdKind::Testnet),
-            Some(NetworkId::Named(NetworkIdName::Devnet)) => Ok(ffi::NetworkIdKind::Devnet),
+            Some(NetworkId::Named(name)) => Ok(name.into()),
             Some(NetworkId::Numeric(_)) => Ok(ffi::NetworkIdKind::Numeric),
             None => Err("OptionalNetworkId has no value".into()),
         }
@@ -223,11 +259,7 @@ impl OptionalNodeSize {
 
     pub fn kind(&self) -> Result<ffi::NodeSizeKind, String> {
         match self.0 {
-            Some(NodeSize::Named(NodeSizeName::Tiny)) => Ok(ffi::NodeSizeKind::Tiny),
-            Some(NodeSize::Named(NodeSizeName::Small)) => Ok(ffi::NodeSizeKind::Small),
-            Some(NodeSize::Named(NodeSizeName::Medium)) => Ok(ffi::NodeSizeKind::Medium),
-            Some(NodeSize::Named(NodeSizeName::Large)) => Ok(ffi::NodeSizeKind::Large),
-            Some(NodeSize::Named(NodeSizeName::Huge)) => Ok(ffi::NodeSizeKind::Huge),
+            Some(NodeSize::Named(name)) => Ok(name.into()),
             Some(NodeSize::Numeric(_)) => Ok(ffi::NodeSizeKind::Numeric),
             None => Err("OptionalNodeSize has no value".into()),
         }

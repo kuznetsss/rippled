@@ -86,23 +86,17 @@ pub struct Config {
     pub validators_file: Option<PathBuf>,
     pub server_domain: Option<String>,
 
-    // FFI (phase 2): polymorphic — needs a `{ kind, value }` cxx-shared
-    // wrapper plus a `NetworkIdKind` enum (Main/Testnet/Devnet/Numeric).
-    // Planned manual getters: `has_network_id()`, `network_id_kind()`,
-    // `network_id_value()`.
+    // FFI: see `Config::network_id()` in schema/enums.rs.
     #[config_entry(skip)]
     pub network_id: Option<NetworkId>,
     pub network_quorum: Option<u32>,
-    // FFI (phase 2): polymorphic — `NodeSizeKind` (Tiny/Small/Medium/Large/Huge/Numeric).
-    // Planned: `has_node_size()`, `node_size_kind()`, `node_size_value()`.
+    // FFI: see `Config::node_size()` in schema/enums.rs.
     #[config_entry(skip)]
     pub node_size: Option<NodeSize>,
-    // FFI (phase 2): polymorphic — `LedgerHistoryKind` (Full/None/Numeric).
-    // Planned: `has_ledger_history()`, `ledger_history_kind()`, `ledger_history_value()`.
+    // FFI: see `Config::ledger_history()` in schema/enums.rs.
     #[config_entry(skip)]
     pub ledger_history: Option<LedgerHistory>,
-    // FFI (phase 2): polymorphic — `FetchDepthKind` (Full/None/Numeric).
-    // Planned: `has_fetch_depth()`, `fetch_depth_kind()`, `fetch_depth_value()`.
+    // FFI: see `Config::fetch_depth()` in schema/enums.rs.
     #[config_entry(skip)]
     pub fetch_depth: Option<FetchDepth>,
 
@@ -151,13 +145,10 @@ pub struct Config {
     /// At most one line in the INI form; numeric `0` ⇒ auto.
     pub validator_list_threshold: Option<u32>,
 
-    // FFI (phase 2): data-less enum — needs a cxx-shared `RelayMode` enum
-    // (All/Trusted/DropUntrusted) plus an `OptionalRelayMode` wrapper.
-    // Planned manual getter: `relay_proposals()` returning `OptionalRelayMode`.
+    // FFI: see `Config::relay_proposals()` in schema/enums.rs.
     #[config_entry(skip)]
     pub relay_proposals: Option<RelayMode>,
-    // FFI (phase 2): same `RelayMode` enum reused.
-    // Planned: `relay_validations()` returning `OptionalRelayMode`.
+    // FFI: see `Config::relay_validations()` in schema/enums.rs.
     #[config_entry(skip)]
     pub relay_validations: Option<RelayMode>,
 
@@ -170,15 +161,10 @@ pub struct Config {
     pub transaction_queue: Option<TransactionQueue>,
     pub hashrouter: Option<HashRouter>,
 
-    // FFI (phase 2): internally-tagged enum (NuDB | RocksDB) with variant-
-    // specific fields. Flat shape will be `{ kind, common: NodeDbCommon,
-    // nudb_block_size, cache_mb, filter_bits }`.
-    // Planned: `has_node_db()` + a `node_db()` returning a hand-written
-    // `NodeDbView` opaque type whose getters expose the flat shape.
+    // FFI: see `Config::node_db()` in schema/database.rs; returns `OptionalNodeDb`.
     #[config_entry(skip)]
     pub node_db: Option<NodeDb>,
-    // FFI (phase 2): same shape as `node_db`. Planned: `has_import_db()` and
-    // `import_db()` returning the same `NodeDbView`.
+    // FFI: see `Config::import_db()` in schema/database.rs; returns `OptionalNodeDb`.
     #[config_entry(skip)]
     pub import_db: Option<NodeDb>,
     pub sqlite: Option<Sqlite>,
@@ -195,10 +181,10 @@ pub struct Config {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::database::{JournalMode, SafetyLevel, SqdbBackend, Synchronous, TempStore};
     use super::enums::{LedgerHistoryName, NetworkIdName, NodeSizeName};
     use super::server::{PortLimit, PortLimitName, Protocol};
+    use super::*;
 
     // Smoke tests for the TOML-shaped schema.
     //
@@ -331,8 +317,7 @@ mod tests {
             nudb_block_size = 4096
         "#,
         )
-        .err()
-        .expect("RocksDB + nudb_block_size must be rejected");
+        .expect_err("RocksDB + nudb_block_size must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("nudb_block_size"), "unexpected error: {msg}");
     }
@@ -359,9 +344,8 @@ mod tests {
 
     #[test]
     fn unknown_top_level_key_is_a_hard_error() {
-        let err = toml::from_str::<Config>("not_a_real_key = 1")
-            .err()
-            .expect("typo must be rejected");
+        let err =
+            toml::from_str::<Config>("not_a_real_key = 1").expect_err("typo must be rejected");
         assert!(err.to_string().contains("not_a_real_key"));
     }
 

@@ -72,20 +72,16 @@ pub struct RocksDbOptions {
 pub struct Sqlite {
     /// `"high"` or `"low"`. Cannot coexist with `journal_mode`,
     /// `synchronous`, or `temp_store` (validated post-deserialize).
-    // FFI (phase 2): data-less enum — cxx-shared `SafetyLevel` + `OptionalSafetyLevel`.
-    // Planned: `Sqlite::safety_level()` returning `OptionalSafetyLevel`.
+    // FFI: `Sqlite::safety_level()` below.
     #[config_entry(skip)]
     pub safety_level: Option<SafetyLevel>,
-    // FFI (phase 2): cxx-shared `JournalMode` (Delete|Truncate|Persist|Memory|Wal|Off).
-    // Planned: `Sqlite::journal_mode()` returning `OptionalJournalMode`.
+    // FFI: `Sqlite::journal_mode()` below.
     #[config_entry(skip)]
     pub journal_mode: Option<JournalMode>,
-    // FFI (phase 2): cxx-shared `Synchronous` (Off|Normal|Full|Extra).
-    // Planned: `Sqlite::synchronous()` returning `OptionalSynchronous`.
+    // FFI: `Sqlite::synchronous()` below.
     #[config_entry(skip)]
     pub synchronous: Option<Synchronous>,
-    // FFI (phase 2): cxx-shared `TempStore` (Default|File|Memory).
-    // Planned: `Sqlite::temp_store()` returning `OptionalTempStore`.
+    // FFI: `Sqlite::temp_store()` below.
     #[config_entry(skip)]
     pub temp_store: Option<TempStore>,
     /// Power of two in `[512, 65536]`. Default `4096`.
@@ -134,8 +130,7 @@ pub enum TempStore {
 #[serde(deny_unknown_fields)]
 pub struct Sqdb {
     /// Only `"sqlite"` is accepted.
-    // FFI (phase 2): cxx-shared `SqdbBackend` (Sqlite).
-    // Planned: `Sqdb::backend()` returning `OptionalSqdbBackend`.
+    // FFI: `Sqdb::backend()` below.
     #[config_entry(skip)]
     pub backend: Option<SqdbBackend>,
 }
@@ -282,6 +277,15 @@ impl OptionalTempStore {
     }
 }
 
+impl From<&NodeDb> for ffi::NodeDbKind {
+    fn from(value: &NodeDb) -> Self {
+        match value {
+            NodeDb::NuDb(_) => ffi::NodeDbKind::NuDb,
+            NodeDb::RocksDb(_) => ffi::NodeDbKind::RocksDb,
+        }
+    }
+}
+
 impl From<SqdbBackend> for ffi::SqdbBackend {
     fn from(v: SqdbBackend) -> ffi::SqdbBackend {
         match v {
@@ -325,8 +329,7 @@ impl OptionalNodeDb {
 
     pub fn kind(&self) -> Result<ffi::NodeDbKind, String> {
         match &self.0 {
-            Some(NodeDb::NuDb(_)) => Ok(ffi::NodeDbKind::NuDb),
-            Some(NodeDb::RocksDb(_)) => Ok(ffi::NodeDbKind::RocksDb),
+            Some(node_db) => Ok(node_db.into()),
             None => Err("OptionalNodeDb has no value".into()),
         }
     }
@@ -346,41 +349,35 @@ impl OptionalNodeDb {
     }
 
     pub fn fast_load(&self) -> Box<OptionalBool> {
-        Box::new(OptionalBool(self.common().and_then(|c| c.fast_load)))
+        Box::new(self.common().and_then(|c| c.fast_load).into())
     }
 
     pub fn earliest_seq(&self) -> Box<OptionalU32> {
-        Box::new(OptionalU32(self.common().and_then(|c| c.earliest_seq)))
+        Box::new(self.common().and_then(|c| c.earliest_seq).into())
     }
 
     pub fn online_delete(&self) -> Box<OptionalU32> {
-        Box::new(OptionalU32(self.common().and_then(|c| c.online_delete)))
+        Box::new(self.common().and_then(|c| c.online_delete).into())
     }
 
     pub fn advisory_delete(&self) -> Box<OptionalBool> {
-        Box::new(OptionalBool(self.common().and_then(|c| c.advisory_delete)))
+        Box::new(self.common().and_then(|c| c.advisory_delete).into())
     }
 
     pub fn delete_batch(&self) -> Box<OptionalU32> {
-        Box::new(OptionalU32(self.common().and_then(|c| c.delete_batch)))
+        Box::new(self.common().and_then(|c| c.delete_batch).into())
     }
 
     pub fn back_off_milliseconds(&self) -> Box<OptionalU32> {
-        Box::new(OptionalU32(
-            self.common().and_then(|c| c.back_off_milliseconds),
-        ))
+        Box::new(self.common().and_then(|c| c.back_off_milliseconds).into())
     }
 
     pub fn age_threshold_seconds(&self) -> Box<OptionalU32> {
-        Box::new(OptionalU32(
-            self.common().and_then(|c| c.age_threshold_seconds),
-        ))
+        Box::new(self.common().and_then(|c| c.age_threshold_seconds).into())
     }
 
     pub fn recovery_wait_seconds(&self) -> Box<OptionalU32> {
-        Box::new(OptionalU32(
-            self.common().and_then(|c| c.recovery_wait_seconds),
-        ))
+        Box::new(self.common().and_then(|c| c.recovery_wait_seconds).into())
     }
 
     pub fn nudb_block_size(&self) -> Box<OptionalU32> {
@@ -388,7 +385,7 @@ impl OptionalNodeDb {
             Some(NodeDb::NuDb(o)) => o.nudb_block_size,
             _ => None,
         };
-        Box::new(OptionalU32(v))
+        Box::new(v.into())
     }
 
     pub fn cache_mb(&self) -> Box<OptionalU32> {
@@ -396,7 +393,7 @@ impl OptionalNodeDb {
             Some(NodeDb::RocksDb(o)) => o.cache_mb,
             _ => None,
         };
-        Box::new(OptionalU32(v))
+        Box::new(v.into())
     }
 
     pub fn filter_bits(&self) -> Box<OptionalU32> {
@@ -404,7 +401,7 @@ impl OptionalNodeDb {
             Some(NodeDb::RocksDb(o)) => o.filter_bits,
             _ => None,
         };
-        Box::new(OptionalU32(v))
+        Box::new(v.into())
     }
 }
 

@@ -12,8 +12,7 @@ use crate::ffi;
 pub struct Insight {
     /// Currently only `"statsd"` is recognized; omit the section to use the
     /// null collector.
-    // FFI (phase 2): cxx-shared `InsightServer` (Statsd).
-    // Planned: `Insight::server()` returning `OptionalInsightServer`.
+    // FFI: `Insight::server()` below.
     #[config_entry(skip)]
     pub server: Option<InsightServer>,
     /// `host:port`. Consumed only when `server = "statsd"`.
