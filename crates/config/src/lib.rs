@@ -1,12 +1,22 @@
 pub mod error;
 pub mod ffi;
+pub mod ini;
 pub mod schema;
 
 use std::fs;
 use std::path::Path;
 
 pub use crate::error::ParseError;
+use crate::ini::parse_ini;
 use crate::schema::Config;
+
+/// Warnings emitted when parsing a legacy INI file.
+#[derive(Debug, Default, Clone)]
+pub struct IniWarnings {
+    /// `true` when any section contained trailing `# comments` (after
+    /// comment-stripping), matching the behaviour of `BasicConfig::hadTrailingComments()`.
+    pub had_trailing_comments: bool,
+}
 
 /// Parse a `Config` from an in-memory TOML document.
 pub fn parse_from_toml_str(s: &str) -> Result<Config, ParseError> {
@@ -14,8 +24,18 @@ pub fn parse_from_toml_str(s: &str) -> Result<Config, ParseError> {
 }
 
 /// Parse a `Config` from an in-memory legacy INI document.
-pub fn parse_from_ini_str(_s: &str) -> Result<Config, ParseError> {
-    todo!("legacy INI parser not yet implemented")
+///
+/// Returns `(Config, IniWarnings)` on success.
+pub fn parse_from_ini_str(s: &str) -> Result<(Config, IniWarnings), ParseError> {
+    let bc = parse_ini(s);
+    let had_trailing_comments = bc.values().any(|sec| sec.had_trailing_comments);
+    let config: Config = ini::from_basic_config(&bc)?;
+    Ok((
+        config,
+        IniWarnings {
+            had_trailing_comments,
+        },
+    ))
 }
 
 /// Read a config file from disk and dispatch to the appropriate parser based
@@ -24,7 +44,10 @@ pub fn parse_from_ini_str(_s: &str) -> Result<Config, ParseError> {
 /// * `.toml`                  → TOML parser
 /// * `.ini`, `.cfg`, `.txt`   → legacy INI parser
 /// * anything else / missing  → [`ParseError::UnsupportedFormat`]
-pub fn parse_from_file<P: AsRef<Path>>(path: P) -> Result<Config, ParseError> {
+///
+/// Returns `(Config, IniWarnings)`.  For TOML files `had_trailing_comments`
+/// is always `false`.
+pub fn parse_from_file<P: AsRef<Path>>(path: P) -> Result<(Config, IniWarnings), ParseError> {
     let path = path.as_ref();
     let contents = fs::read_to_string(path)?;
     let ext = path
@@ -33,7 +56,10 @@ pub fn parse_from_file<P: AsRef<Path>>(path: P) -> Result<Config, ParseError> {
         .unwrap_or("")
         .to_ascii_lowercase();
     match ext.as_str() {
-        "toml" => parse_from_toml_str(&contents),
+        "toml" => {
+            let cfg = parse_from_toml_str(&contents)?;
+            Ok((cfg, IniWarnings::default()))
+        }
         "ini" | "cfg" | "txt" => parse_from_ini_str(&contents),
         _ => Err(ParseError::UnsupportedFormat(ext)),
     }
@@ -62,10 +88,25 @@ mod tests {
         let toml_path = dir.join("example.toml");
         std::fs::write(&toml_path, "network_quorum = 7\n").unwrap();
 
-        let cfg = parse_from_file(&toml_path).unwrap();
+        let (cfg, warnings) = parse_from_file(&toml_path).unwrap();
         assert_eq!(cfg.network_quorum, Some(7));
+        assert!(!warnings.had_trailing_comments);
 
         std::fs::remove_file(&toml_path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_from_file_ini_extension() {
+        let dir = std::env::temp_dir().join(format!("config-test-ini-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini_path = dir.join("example.cfg");
+        std::fs::write(&ini_path, "[network_quorum]\n3\n").unwrap();
+
+        let (cfg, _) = parse_from_file(&ini_path).unwrap();
+        assert_eq!(cfg.network_quorum, Some(3));
+
+        std::fs::remove_file(&ini_path).unwrap();
         std::fs::remove_dir(&dir).unwrap();
     }
 
@@ -93,8 +134,16 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
-    fn parse_from_ini_str_is_todo() {
-        let _ = parse_from_ini_str("");
+    fn parse_from_ini_str_minimal() {
+        let (cfg, warnings) = parse_from_ini_str("[network_quorum]\n3").unwrap();
+        assert_eq!(cfg.network_quorum, Some(3));
+        assert!(!warnings.had_trailing_comments);
+    }
+
+    #[test]
+    fn parse_from_ini_str_returns_ini_warnings() {
+        // A trailing comment should surface in IniWarnings.
+        let (_, warnings) = parse_from_ini_str("[network_quorum]\n3 # trailing").unwrap();
+        assert!(warnings.had_trailing_comments);
     }
 }

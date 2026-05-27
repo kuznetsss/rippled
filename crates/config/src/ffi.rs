@@ -283,6 +283,7 @@ mod bridge {
         // throwing `bad_expected_access` on `unexpected`.
         fn has_value(self: &ParseOutcome) -> bool;
         fn has_error(self: &ParseOutcome) -> bool;
+        fn had_trailing_comments(self: &ParseOutcome) -> bool;
         fn value(self: &mut ParseOutcome) -> Result<Box<Config>>;
         fn error(self: &ParseOutcome) -> Result<String>;
 

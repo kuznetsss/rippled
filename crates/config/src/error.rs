@@ -4,6 +4,7 @@
 use std::io;
 
 use crate::schema::Config;
+use crate::IniWarnings;
 
 /// Errors returned by the config parsers.
 #[derive(Debug)]
@@ -60,18 +61,36 @@ impl From<toml::de::Error> for ParseError {
 /// `error()` to retrieve. Accessing the wrong arm throws — programmer error,
 /// same semantics as `std::expected::value()` on an unexpected.
 ///
+/// `had_trailing_comments()` returns `true` when the parsed file was an INI
+/// file that contained trailing `#` comments (post-stripping).  Always
+/// `false` for TOML files and error results.
+///
 /// The internal `Option` exists because cxx doesn't allow `Box<Self>` as a
 /// receiver: `value()` has to take `&mut self`, so the move-out is done with
 /// `Option::take`. Calling `value()` a second time throws (the slot is empty).
 pub struct ParseOutcome {
     inner: Option<Result<Box<Config>, ParseError>>,
+    warnings: IniWarnings,
 }
 
 impl ParseOutcome {
-    /// Wrap a parser's `Result` into an outcome handle.
-    pub fn from_result(result: Result<Config, ParseError>) -> Box<Self> {
+    /// Wrap a TOML parser's `Result` into an outcome handle (no warnings).
+    pub fn from_toml_result(result: Result<Config, ParseError>) -> Box<Self> {
         Box::new(Self {
             inner: Some(result.map(Box::new)),
+            warnings: IniWarnings::default(),
+        })
+    }
+
+    /// Wrap an INI parser's `Result` (includes warnings) into an outcome handle.
+    pub fn from_ini_result(result: Result<(Config, IniWarnings), ParseError>) -> Box<Self> {
+        let (inner, warnings) = match result {
+            Ok((cfg, w)) => (Ok(Box::new(cfg)), w),
+            Err(e) => (Err(e), IniWarnings::default()),
+        };
+        Box::new(Self {
+            inner: Some(inner),
+            warnings,
         })
     }
 
@@ -83,13 +102,19 @@ impl ParseOutcome {
         matches!(&self.inner, Some(Err(_)))
     }
 
+    /// Returns `true` if the parse succeeded and the source was an INI file
+    /// that contained trailing comments.  Always `false` for TOML and errors.
+    /// Survives `value()` consumption.
+    pub fn had_trailing_comments(&self) -> bool {
+        self.warnings.had_trailing_comments
+    }
+
     /// Move the parsed `Config` out of the outcome. Throws (via cxx) if
     /// `has_value()` is false, or if `value()` was already called once.
     pub fn value(&mut self) -> Result<Box<Config>, String> {
         match self.inner.take() {
             Some(Ok(cfg)) => Ok(cfg),
             Some(Err(e)) => {
-                // Put the error back so `error()` still works afterwards.
                 self.inner = Some(Err(e));
                 Err("ParseOutcome::value() called on an error result".into())
             }
