@@ -307,7 +307,9 @@ mod tests {
     use crate::ffi::{FetchDepthKind, LedgerHistoryKind, NetworkIdKind, NodeSizeKind, RelayMode};
 
     fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
-        Box::new(crate::parse_from_toml_str(s).expect("parse succeeded"))
+        let (cfg, _) = crate::parse_from_str(s, crate::ConfigFormat::Toml, crate::LoadOptions::default())
+            .expect("parse succeeded");
+        Box::new(cfg)
     }
 
     // ----- Data-less optional-enum wrappers -----

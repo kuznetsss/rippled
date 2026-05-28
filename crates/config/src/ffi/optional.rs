@@ -40,9 +40,12 @@ pub type OptionalString = Optional<String>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::bridge::ConfigFormat;
+    use crate::ffi::load_options_new;
 
     fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
-        let mut outcome = crate::ffi::parse_from_toml_str(s);
+        let opts = load_options_new();
+        let mut outcome = crate::ffi::parse_from_str(s, ConfigFormat::Toml, &opts);
         assert!(
             outcome.has_value(),
             "parse failed: {}",

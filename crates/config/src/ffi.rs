@@ -10,8 +10,8 @@
 //! - **Schema-side `OptionalT` wrappers** for enum and tagged types live next to their
 //!   schema definitions n `schema/{enums,database,diagnostics,server}.rs` and are
 //!   re-imported here so the bridge can resolve them.
-//! - **Parse entry points** (`parse_from_toml_str`, `parse_from_ini_str`,
-//!   `parse_from_file`) and `ParseOutcome` complete the bridge surface.
+//! - **Parse entry points** (`parse_from_file`, `parse_from_str`) and `ParseOutcome`
+//!   complete the bridge surface.
 //! - **Tests** for primitive wrappers live in `optional.rs`; tests for enum/
 //!   tagged wrappers live in the same file as their types.
 
@@ -20,7 +20,7 @@
 mod optional;
 mod parse;
 pub use optional::*;
-use parse::{parse_from_file, parse_from_ini_str, parse_from_toml_str};
+use parse::{parse_from_file, parse_from_str};
 
 use crate::error::{ParseError, ParseOutcome};
 use crate::schema::Config;
@@ -41,6 +41,7 @@ use crate::schema::reduce_relay::ReduceRelay;
 use crate::schema::server::{OptionalPortLimit, PortConfig, Server};
 use crate::schema::transaction_queue::TransactionQueue;
 use crate::schema::voting::Voting;
+use crate::LoadOptions;
 
 // cxx-bridge generates wrapper code that requires explicit lifetimes on
 // `unsafe fn` returning `Result<&'a T>` — elision causes a borrow-check
@@ -141,6 +142,13 @@ mod bridge {
     enum NodeDbKind {
         NuDb,
         RocksDb,
+    }
+
+    // ----- Config format discriminant (passed to parse_from_str) -----
+
+    enum ConfigFormat {
+        Toml,
+        Ini,
     }
 
     extern "Rust" {
@@ -266,14 +274,27 @@ mod bridge {
         // ----- Parse outcome (std::expected analogue) -----
         type ParseOutcome;
 
+        // ----- LoadOptions: opaque type with constructor and setters -----
+        type LoadOptions;
+        fn load_options_new() -> Box<LoadOptions>;
+        fn set_standalone(self: &mut LoadOptions, value: bool);
+        fn set_quorum_override(self: &mut LoadOptions, value: u32);
+        fn set_config_dir(self: &mut LoadOptions, path: &str);
+
+        // ----- Config: bootstrap (creates dirs) -----
+        fn bootstrap(self: &Config) -> Result<()>;
+
+        // ----- Free function: config path search -----
+        fn detect_config_path_from_env() -> Box<OptionalString>;
+
         // ----- Parse entry points -----
         //
         // These always succeed at the FFI boundary — errors are carried inside
         // the returned `ParseOutcome`. The C++ side discriminates via
         // `has_value()` / `has_error()` and then calls `value()` or `error()`.
-        fn parse_from_toml_str(s: &str) -> Box<ParseOutcome>;
-        fn parse_from_ini_str(s: &str) -> Box<ParseOutcome>;
-        fn parse_from_file(path: &str) -> Box<ParseOutcome>;
+        fn parse_from_str(content: &str, format: ConfigFormat, opts: &LoadOptions)
+            -> Box<ParseOutcome>;
+        fn parse_from_file(path: &str, opts: &LoadOptions) -> Box<ParseOutcome>;
 
         // ----- ParseOutcome methods -----
         //
@@ -509,16 +530,39 @@ pub use bridge::*;
 
 // ---- Bridge thunk implementations ----
 //
-// cxx routes the bridge's `parse_*` declarations to free functions in the
+// cxx routes the bridge's parse declarations to free functions in the
 // `parse` submodule. The `pub(crate) use` brings them into `ffi`'s scope so
-// the bridge's `super::parse_from_*` lookups resolve correctly.
+// the bridge's `super::parse_*` lookups resolve correctly.
+
+/// FFI wrapper for [`crate::detect_config_path_from_env`].
+///
+/// cxx routes the bridge's `detect_config_path_from_env()` declaration to
+/// this function because it lives in the same scope as the bridge.
+fn detect_config_path_from_env() -> Box<OptionalString> {
+    let result = crate::detect_config_path_from_env();
+    Box::new(OptionalString::from(
+        result.map(|p| p.to_string_lossy().into_owned()),
+    ))
+}
+
+/// Construct a new default [`LoadOptions`] on the heap.
+///
+/// C++ callers use this as the constructor for the opaque `LoadOptions` type.
+fn load_options_new() -> Box<LoadOptions> {
+    Box::new(LoadOptions::default())
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn default_opts() -> Box<LoadOptions> {
+        load_options_new()
+    }
+
     fn ok_outcome(s: &str) -> Box<Config> {
-        let mut outcome = super::parse_from_toml_str(s);
+        let opts = default_opts();
+        let mut outcome = super::parse_from_str(s, bridge::ConfigFormat::Toml, &opts);
         assert!(
             outcome.has_value(),
             "parse failed: {}",
@@ -529,14 +573,17 @@ mod tests {
 
     #[test]
     fn parse_outcome_carries_value() {
-        let outcome = super::parse_from_toml_str("network_quorum = 3");
+        let opts = default_opts();
+        let outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml, &opts);
         assert!(outcome.has_value());
         assert!(!outcome.has_error());
     }
 
     #[test]
     fn parse_outcome_carries_error() {
-        let outcome = super::parse_from_toml_str("not_a_real_key = 1");
+        let opts = default_opts();
+        let outcome =
+            super::parse_from_str("not_a_real_key = 1", bridge::ConfigFormat::Toml, &opts);
         assert!(!outcome.has_value());
         assert!(outcome.has_error());
         let msg = outcome.error().expect("has_error=true");
@@ -545,19 +592,24 @@ mod tests {
 
     #[test]
     fn parse_outcome_value_throws_on_error_arm() {
-        let mut outcome = super::parse_from_toml_str("not_a_real_key = 1");
+        let opts = default_opts();
+        let mut outcome =
+            super::parse_from_str("not_a_real_key = 1", bridge::ConfigFormat::Toml, &opts);
         assert!(outcome.value().is_err());
     }
 
     #[test]
     fn parse_outcome_error_throws_on_value_arm() {
-        let outcome = super::parse_from_toml_str("network_quorum = 3");
+        let opts = default_opts();
+        let outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml, &opts);
         assert!(outcome.error().is_err());
     }
 
     #[test]
     fn parse_outcome_value_consumed_once() {
-        let mut outcome = super::parse_from_toml_str("network_quorum = 3");
+        let opts = default_opts();
+        let mut outcome =
+            super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml, &opts);
         assert!(outcome.value().is_ok());
         assert!(outcome.value().is_err());
     }
@@ -627,5 +679,14 @@ mod tests {
         );
         let srv = cfg.server().unwrap();
         assert!(srv.defaults().admin().is_empty());
+    }
+
+    #[test]
+    fn load_options_setters_work() {
+        let mut opts = load_options_new();
+        opts.set_standalone(true);
+        opts.set_quorum_override(5);
+        assert!(opts.standalone);
+        assert_eq!(opts.quorum_override, Some(5));
     }
 }

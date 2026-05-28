@@ -19,6 +19,37 @@ pub enum ParseError {
     DuplicateValue(String),
 }
 
+/// Errors returned by [`Config::bootstrap`].
+///
+/// A separate type from `ParseError` so the C++ bridge can surface it
+/// distinctly.  Currently only wraps I/O failures from directory creation.
+#[derive(Debug)]
+pub enum BootstrapError {
+    Io(io::Error),
+}
+
+impl std::fmt::Display for BootstrapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BootstrapError::Io(e) => write!(f, "bootstrap I/O error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for BootstrapError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            BootstrapError::Io(e) => Some(e),
+        }
+    }
+}
+
+impl From<io::Error> for BootstrapError {
+    fn from(e: io::Error) -> Self {
+        BootstrapError::Io(e)
+    }
+}
+
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

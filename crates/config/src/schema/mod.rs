@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ParseError;
 
+pub mod config_impl;
 pub mod database;
 pub mod diagnostics;
 pub mod enums;
@@ -550,8 +551,10 @@ mod tests {
 
     #[test]
     fn merge_validators_threshold_file_takes_precedence_over_main() {
-        let mut cfg = Config::default();
-        cfg.validator_list_threshold = Some(5);
+        let mut cfg = Config {
+            validator_list_threshold: Some(5),
+            ..Default::default()
+        };
 
         let mut v = make_validator_data(&[], &[], &[], &[]);
         v.validator_list_threshold = Some(99);

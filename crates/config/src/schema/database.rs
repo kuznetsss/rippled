@@ -448,7 +448,9 @@ mod tests {
     use crate::ffi::{JournalMode, NodeDbKind, SafetyLevel, SqdbBackend, Synchronous, TempStore};
 
     fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
-        Box::new(crate::parse_from_toml_str(s).expect("parse succeeded"))
+        let (cfg, _) = crate::parse_from_str(s, crate::ConfigFormat::Toml, crate::LoadOptions::default())
+            .expect("parse succeeded");
+        Box::new(cfg)
     }
 
     // ----- Sqlite wrappers -----
