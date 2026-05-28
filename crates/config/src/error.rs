@@ -14,6 +14,9 @@ pub enum ParseError {
     Ini(String),
     /// File extension didn't match any known config format.
     UnsupportedFormat(String),
+    /// A value appears in both the main config and the validators file when
+    /// strict merging is in effect.
+    DuplicateValue(String),
 }
 
 impl std::fmt::Display for ParseError {
@@ -28,6 +31,7 @@ impl std::fmt::Display for ParseError {
             ParseError::UnsupportedFormat(ext) => {
                 write!(f, "unsupported config format: .{ext}")
             }
+            ParseError::DuplicateValue(msg) => write!(f, "duplicate validator entry: {msg}"),
         }
     }
 }
@@ -37,7 +41,7 @@ impl std::error::Error for ParseError {
         match self {
             ParseError::Io(e) => Some(e),
             ParseError::Toml(e) => Some(e),
-            ParseError::Ini(_) | ParseError::UnsupportedFormat(_) => None,
+            ParseError::Ini(_) | ParseError::UnsupportedFormat(_) | ParseError::DuplicateValue(_) => None,
         }
     }
 }

@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use config_derive::ConfigEntries;
 use serde::{Deserialize, Serialize};
 
+use crate::error::ParseError;
+
 pub mod database;
 pub mod diagnostics;
 pub mod enums;
@@ -177,6 +179,66 @@ pub struct Config {
 
     pub crawl: Option<Crawl>,
     pub vl: Option<Vl>,
+}
+
+/// Data parsed from a separate validators file (pointed to by `validators_file`
+/// in the main config).
+///
+/// The validators file uses the same format as the main config (TOML for TOML
+/// configs, INI for INI configs) but is restricted to only these five fields.
+/// Attempting to include any other section/key is a hard error.
+///
+/// After parsing, the data is merged into the main `Config` via
+/// [`Config::merge_validators`].
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidatorData {
+    #[serde(default)]
+    pub validators: Vec<String>,
+    #[serde(default)]
+    pub validator_keys: Vec<String>,
+    #[serde(default)]
+    pub validator_list_sites: Vec<String>,
+    #[serde(default)]
+    pub validator_list_keys: Vec<String>,
+    pub validator_list_threshold: Option<u32>,
+}
+
+impl Config {
+    /// Merge validator data loaded from a separate validators file into this
+    /// config.
+    ///
+    /// List fields are appended. `validator_list_threshold` is taken from `v`
+    /// when `v` has a value (validators file takes precedence), matching C++
+    /// behaviour where the validators file unconditionally overwrites.
+    ///
+    /// When `strict` is `true`, any value that already exists in the
+    /// corresponding list on `self` causes an immediate
+    /// [`ParseError::DuplicateValue`] error before any lists are modified.
+    /// When `strict` is `false`, the lists are extended without checks.
+    pub fn merge_validators(&mut self, v: ValidatorData, strict: bool) -> Result<(), ParseError> {
+        let merge = |dst: &mut Vec<String>, src: Vec<String>, field: &str| -> Result<(), ParseError> {
+            if strict {
+                for val in &src {
+                    if dst.contains(val) {
+                        return Err(ParseError::DuplicateValue(format!("{field}: {val}")));
+                    }
+                }
+            }
+            dst.extend(src);
+            Ok(())
+        };
+
+        merge(&mut self.validators, v.validators, "validators")?;
+        merge(&mut self.validator_keys, v.validator_keys, "validator_keys")?;
+        merge(&mut self.validator_list_sites, v.validator_list_sites, "validator_list_sites")?;
+        merge(&mut self.validator_list_keys, v.validator_list_keys, "validator_list_keys")?;
+
+        if v.validator_list_threshold.is_some() {
+            self.validator_list_threshold = v.validator_list_threshold;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -378,5 +440,137 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cfg.sqdb.unwrap().backend, Some(SqdbBackend::Sqlite));
+    }
+
+    // ---- merge_validators tests ----
+
+    fn make_validator_data(
+        validators: &[&str],
+        validator_keys: &[&str],
+        validator_list_sites: &[&str],
+        validator_list_keys: &[&str],
+    ) -> ValidatorData {
+        ValidatorData {
+            validators: validators.iter().map(|s| s.to_string()).collect(),
+            validator_keys: validator_keys.iter().map(|s| s.to_string()).collect(),
+            validator_list_sites: validator_list_sites.iter().map(|s| s.to_string()).collect(),
+            validator_list_keys: validator_list_keys.iter().map(|s| s.to_string()).collect(),
+            validator_list_threshold: None,
+        }
+    }
+
+    #[test]
+    fn merge_validators_strict_no_duplicates_succeeds() {
+        let mut cfg = Config::default();
+        cfg.validators.push("nA".to_string());
+
+        let v = make_validator_data(&["nB"], &[], &[], &[]);
+        assert!(
+            cfg.merge_validators(v, true).is_ok(),
+            "no duplicate should succeed in strict mode"
+        );
+        assert_eq!(cfg.validators, vec!["nA", "nB"]);
+    }
+
+    #[test]
+    fn merge_validators_strict_duplicate_validators_returns_error() {
+        let mut cfg = Config::default();
+        cfg.validators.push("nDUP".to_string());
+
+        let v = make_validator_data(&["nDUP"], &[], &[], &[]);
+        let err = cfg
+            .merge_validators(v, true)
+            .expect_err("duplicate in validators should error in strict mode");
+        assert!(
+            matches!(err, ParseError::DuplicateValue(ref msg) if msg.contains("validators") && msg.contains("nDUP")),
+            "unexpected error: {err:?}"
+        );
+        // The lists must not have been modified.
+        assert_eq!(cfg.validators, vec!["nDUP"]);
+    }
+
+    #[test]
+    fn merge_validators_strict_duplicate_validator_keys_returns_error() {
+        let mut cfg = Config::default();
+        cfg.validator_keys.push("keyDUP".to_string());
+
+        let v = make_validator_data(&[], &["keyDUP"], &[], &[]);
+        let err = cfg
+            .merge_validators(v, true)
+            .expect_err("duplicate in validator_keys should error in strict mode");
+        assert!(
+            matches!(err, ParseError::DuplicateValue(ref msg) if msg.contains("validator_keys") && msg.contains("keyDUP")),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(cfg.validator_keys, vec!["keyDUP"]);
+    }
+
+    #[test]
+    fn merge_validators_strict_duplicate_validator_list_sites_returns_error() {
+        let mut cfg = Config::default();
+        cfg.validator_list_sites
+            .push("https://example.com".to_string());
+
+        let v = make_validator_data(&[], &[], &["https://example.com"], &[]);
+        let err = cfg
+            .merge_validators(v, true)
+            .expect_err("duplicate in validator_list_sites should error in strict mode");
+        assert!(
+            matches!(err, ParseError::DuplicateValue(ref msg) if msg.contains("validator_list_sites")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn merge_validators_strict_duplicate_validator_list_keys_returns_error() {
+        let mut cfg = Config::default();
+        cfg.validator_list_keys.push("hexkey".to_string());
+
+        let v = make_validator_data(&[], &[], &[], &["hexkey"]);
+        let err = cfg
+            .merge_validators(v, true)
+            .expect_err("duplicate in validator_list_keys should error in strict mode");
+        assert!(
+            matches!(err, ParseError::DuplicateValue(ref msg) if msg.contains("validator_list_keys") && msg.contains("hexkey")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn merge_validators_non_strict_allows_duplicates() {
+        let mut cfg = Config::default();
+        cfg.validators.push("nDUP".to_string());
+
+        let v = make_validator_data(&["nDUP", "nB"], &[], &[], &[]);
+        cfg.merge_validators(v, false)
+            .expect("non-strict mode must not error on duplicates");
+        // Both entries are appended, including the duplicate.
+        assert_eq!(cfg.validators, vec!["nDUP", "nDUP", "nB"]);
+    }
+
+    #[test]
+    fn merge_validators_threshold_file_takes_precedence_over_main() {
+        let mut cfg = Config::default();
+        cfg.validator_list_threshold = Some(5);
+
+        let mut v = make_validator_data(&[], &[], &[], &[]);
+        v.validator_list_threshold = Some(99);
+
+        cfg.merge_validators(v, true)
+            .expect("no duplicates, should succeed");
+        // Validators file value must overwrite main config value (matches C++ behaviour).
+        assert_eq!(cfg.validator_list_threshold, Some(99));
+    }
+
+    #[test]
+    fn merge_validators_threshold_taken_from_v_when_main_is_unset() {
+        let mut cfg = Config::default();
+
+        let mut v = make_validator_data(&[], &[], &[], &[]);
+        v.validator_list_threshold = Some(3);
+
+        cfg.merge_validators(v, true)
+            .expect("no duplicates, should succeed");
+        assert_eq!(cfg.validator_list_threshold, Some(3));
     }
 }

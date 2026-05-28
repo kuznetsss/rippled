@@ -724,6 +724,63 @@ root config requires a TOML validators file; the legacy INI loader continues
 to accept INI files. Inline use (defining `validators`,
 `validator_list_*` directly in the main file) is also fully supported.
 
+**Path resolution:** Relative paths in `validators_file` are resolved against
+the parent directory of the main config file.
+
+**Format pairing:**
+
+| Main config extension | Validators file extension |
+| --------------------- | ------------------------- |
+| `.toml`               | `.toml`                   |
+| `.ini`, `.cfg`, `.txt` | `.ini`, `.cfg`, `.txt` (or any non-`.toml` extension) |
+
+**Valid sections/fields** (only these five are permitted; any other
+section/key is a hard error):
+
+| Field                    | Type           | Description                                              |
+| ------------------------ | -------------- | -------------------------------------------------------- |
+| `validators`             | list of string | Trusted validator public keys (`n…`).                    |
+| `validator_keys`         | list of string | Merged into `validators` post-load.                      |
+| `validator_list_sites`   | list of string | Validator-list publisher URIs.                           |
+| `validator_list_keys`    | list of string | Hex-encoded publisher public keys.                       |
+| `validator_list_threshold` | unsigned int | Optional. Minimum threshold for a valid UNL.            |
+
+**Validation:** At least one of `validators`, `validator_keys`, or
+`validator_list_keys` must be non-empty. An all-empty file is a hard error.
+
+**Merge behavior:**
+- List fields (`validators`, `validator_keys`, `validator_list_sites`,
+  `validator_list_keys`) are **appended** to any values already in the main
+  config.
+- `validator_list_threshold`: if the main config has already set this field,
+  the validators file value is **ignored** (main config takes precedence).
+  If the main config has not set it, the validators file value is used.
+
+**TOML example** (`validators.toml`):
+
+```toml
+validators = [
+    "nHB5a4FNUL4bGmDR2Y4DziGxGsQFiCFHJLbGFoiLnmb8PELtV8Lp",
+    "nHULqGBkJtWeNFjhTzYeAsHA3qKKS7HoBh8CV3BAGTGMZuepEhWC",
+]
+validator_list_sites = ["https://vl.ripple.com"]
+validator_list_keys  = ["ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C064D11F42EF336AFCD"]
+```
+
+**INI example** (`validators.txt`):
+
+```ini
+[validators]
+nHB5a4FNUL4bGmDR2Y4DziGxGsQFiCFHJLbGFoiLnmb8PELtV8Lp
+nHULqGBkJtWeNFjhTzYeAsHA3qKKS7HoBh8CV3BAGTGMZuepEhWC
+
+[validator_list_sites]
+https://vl.ripple.com
+
+[validator_list_keys]
+ED2677ABFFD1B33AC6FBC3062B71F1E8397C1505E1C42C064D11F42EF336AFCD
+```
+
 #### 7.3.4. Polymorphic scalars
 
 Several keys accept either a numeric value or a named alias. The Rust

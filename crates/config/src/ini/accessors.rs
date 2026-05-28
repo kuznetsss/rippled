@@ -20,6 +20,11 @@ pub trait BasicConfigExt {
     /// Returns an empty Vec if the section is absent.
     fn values_of(&self, name: &str) -> Vec<String>;
 
+    /// Collect ALL lines (both value-lines and key=value lines) from section
+    /// `name` into a `Vec<String>`.  Mirrors C++ `Section::lines()`.
+    /// Returns an empty Vec if the section is absent.
+    fn lines_of(&self, name: &str) -> Vec<String>;
+
     /// Return the scalar value for a single-value section (value-lines only).
     /// For multi-line sections the lines are concatenated (no separator).
     /// Returns `None` if the section is absent or has no value-lines.
@@ -38,6 +43,13 @@ impl BasicConfigExt for BasicConfig {
     fn values_of(&self, name: &str) -> Vec<String> {
         match self.get(name) {
             Some(sec) => sec.values.clone(),
+            None => Vec::new(),
+        }
+    }
+
+    fn lines_of(&self, name: &str) -> Vec<String> {
+        match self.get(name) {
+            Some(sec) => sec.lines.clone(),
             None => Vec::new(),
         }
     }

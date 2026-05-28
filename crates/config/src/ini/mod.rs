@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::error::ParseError;
-use crate::schema::Config;
+use crate::schema::{Config, ValidatorData};
 
 use accessors::BasicConfigExt;
 use builders::{
@@ -330,12 +330,106 @@ fn validate_top_level_sections(bc: &BasicConfig) -> Result<(), ParseError> {
 }
 
 // ---------------------------------------------------------------------------
+// validators_from_basic_config
+//
+// Parse a validators file (INI format) into a `ValidatorData` struct.
+// Only the five validator-related sections are permitted; all others are
+// errors.  Mirrors the C++ behavior from Config.cpp:1048-1061.
+// ---------------------------------------------------------------------------
+
+/// Parse a `ValidatorData` from an INI-format validators file.
+///
+/// Only these sections are permitted: `validators`, `validator_keys`,
+/// `validator_list_sites`, `validator_list_keys`, `validator_list_threshold`.
+/// Any other section is a hard error.
+///
+/// Returns an error if none of `validators`, `validator_keys`, or
+/// `validator_list_keys` has at least one entry (matches C++ validation).
+pub fn validators_from_basic_config(bc: &BasicConfig) -> Result<ValidatorData, ParseError> {
+    const ALLOWED: &[&str] = &[
+        "validators",
+        "validator_keys",
+        "validator_list_sites",
+        "validator_list_keys",
+        "validator_list_threshold",
+    ];
+
+    for name in bc.keys() {
+        let name = name.as_str();
+        if name.is_empty() {
+            continue;
+        }
+        if !ALLOWED.contains(&name) {
+            return Err(ParseError::Ini(format!(
+                "unknown section [{name}] in validators file"
+            )));
+        }
+    }
+
+    let validators = bc.values_of("validators");
+    let validator_keys = bc.values_of("validator_keys");
+    let validator_list_sites = bc.values_of("validator_list_sites");
+    let validator_list_keys = bc.values_of("validator_list_keys");
+
+    // Parse validator_list_threshold from all lines (not just value-lines) to
+    // match C++ behaviour: a key=value entry in the threshold section has
+    // lines().size() > 0 but values().size() == 0, which C++ rejects as
+    // "should contain single value only".
+    let validator_list_threshold: Option<u32> = {
+        let all_lines = bc.lines_of("validator_list_threshold");
+        if all_lines.is_empty() {
+            None
+        } else if all_lines.len() > 1 {
+            return Err(ParseError::Ini(
+                "config section [validator_list_threshold] should contain single value only".into(),
+            ));
+        } else {
+            // Exactly one line — must be a plain value-line (not key=value).
+            // Check that it ended up in values (not lookup), i.e. it's a raw
+            // value-line.  If it's a kv-pair it appears in lines but not values.
+            let value_lines = bc.values_of("validator_list_threshold");
+            if value_lines.is_empty() {
+                return Err(ParseError::Ini(
+                    "config section [validator_list_threshold] should contain single value only"
+                        .into(),
+                ));
+            }
+            let raw = &all_lines[0];
+            raw.trim()
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|e| {
+                    ParseError::Ini(format!(
+                        "cannot parse [validator_list_threshold] value '{raw}': {e}"
+                    ))
+                })?
+        }
+    };
+
+    if validators.is_empty() && validator_keys.is_empty() && validator_list_keys.is_empty() {
+        return Err(ParseError::Ini(
+            "validators file must contain at least one of [validators], \
+             [validator_keys], or [validator_list_keys]"
+                .into(),
+        ));
+    }
+
+    Ok(ValidatorData {
+        validators,
+        validator_keys,
+        validator_list_sites,
+        validator_list_keys,
+        validator_list_threshold,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
-    use super::from_basic_config;
+    use super::{from_basic_config, validators_from_basic_config};
     use crate::ini::parser::parse_ini;
     use crate::schema::database::NodeDb;
     use crate::schema::enums::{LedgerHistory, LedgerHistoryName};
@@ -729,6 +823,46 @@ admin = 127.0.0.1
         assert!(
             msg.contains("totally_unknown_section_xyz"),
             "unexpected error: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 5: validator_list_threshold in validators file — key=value line
+    // is an error (matches C++ "should contain single value only").
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fix5_threshold_as_kv_pair_in_validators_file_is_error() {
+        // "threshold = 3" is a key=value line → goes into lookup, not values.
+        // lines_of() sees it, values_of() doesn't → error.
+        let ini = "[validator_list_keys]\nhexkey1\nhexkey2\nhexkey3\n\
+                   \n[validator_list_threshold]\nthreshold = 3\n";
+        let bc = parse_ini(ini);
+        let err = validators_from_basic_config(&bc).unwrap_err();
+        assert!(
+            err.to_string().contains("single value only"),
+            "expected 'single value only' error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn fix5_threshold_plain_value_in_validators_file_ok() {
+        let ini = "[validator_list_keys]\nhexkey1\nhexkey2\nhexkey3\n\
+                   \n[validator_list_threshold]\n2\n";
+        let bc = parse_ini(ini);
+        let vd = validators_from_basic_config(&bc).unwrap();
+        assert_eq!(vd.validator_list_threshold, Some(2));
+    }
+
+    #[test]
+    fn fix5_threshold_multiple_lines_in_validators_file_is_error() {
+        let ini = "[validator_list_keys]\nhexkey1\nhexkey2\nhexkey3\n\
+                   \n[validator_list_threshold]\n2\n3\n";
+        let bc = parse_ini(ini);
+        let err = validators_from_basic_config(&bc).unwrap_err();
+        assert!(
+            err.to_string().contains("single value only"),
+            "expected 'single value only' error, got: {err:?}"
         );
     }
 
