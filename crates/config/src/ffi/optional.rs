@@ -41,17 +41,23 @@ pub type OptionalString = Optional<String>;
 mod tests {
     use super::*;
     use crate::ffi::bridge::ConfigFormat;
-    use crate::ffi::load_options_new;
+    use crate::ffi::{finalize, parse_from_str};
 
     fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
-        let opts = load_options_new();
-        let mut outcome = crate::ffi::parse_from_str(s, ConfigFormat::Toml, &opts);
+        let mut outcome = parse_from_str(s, ConfigFormat::Toml);
         assert!(
             outcome.has_value(),
             "parse failed: {}",
             outcome.error().unwrap_or_default()
         );
-        outcome.value().expect("has_value=true")
+        let builder = outcome.value().expect("has_value=true");
+        let mut fin = finalize(builder);
+        assert!(
+            fin.has_value(),
+            "finalize failed: {}",
+            fin.error().unwrap_or_default()
+        );
+        fin.value().expect("finalize ok")
     }
 
     #[test]

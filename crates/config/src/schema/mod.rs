@@ -27,7 +27,7 @@ pub mod voting;
 
 use database::{LedgerTxTables, NodeDb, Sqdb, Sqlite};
 use diagnostics::{Insight, Perf};
-use enums::{FetchDepth, LedgerHistory, NetworkId, NodeSize, RelayMode};
+use enums::{FetchDepth, LedgerHistory, NetworkId, NodeSize, RelayMode, StartUpType};
 use grpc::Grpc;
 use hashrouter::HashRouter;
 use misc::{Crawl, Vl};
@@ -180,6 +180,54 @@ pub struct Config {
 
     pub crawl: Option<Crawl>,
     pub vl: Option<Vl>,
+
+    // ----- CLI-derived fields (not from the config file) -----
+    //
+    // These fields are populated by `Config::apply_cli_flags` and are never
+    // read from the TOML/INI file.  `#[serde(skip)]` prevents them from
+    // triggering `deny_unknown_fields`.  `#[config_entry(skip)]` tells the
+    // derive macro to ignore them so we can write hand-crafted FFI getters.
+
+    /// Set when `--standalone` / `-a` is given; forces `ledger_history = 0`
+    /// and skips loading validators in standalone mode.
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub standalone: bool,
+
+    /// Node startup mode, derived from CLI flags.
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub start_up: StartUpType,
+
+    /// Starting ledger hash/sequence supplied via `--ledger` or `--ledgerfile`.
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub start_ledger: Option<String>,
+
+    /// Set when `--import` is given.
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub do_import: bool,
+
+    /// Set when `--valid` is given; start with `START_VALID = true`.
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub start_valid: bool,
+
+    /// Transaction hash to trap during ledger replay (`--trap_tx_hash`).
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub trap_tx_hash: Option<String>,
+
+    /// Forced ledger-present range `(min, max)` from `--force_ledger_present_range`.
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub forced_ledger_range_present: Option<(u32, u32)>,
+
+    /// RPC destination IP (raw string from `--rpc_ip`).
+    #[serde(skip)]
+    #[config_entry(skip)]
+    pub rpc_ip: Option<String>,
 }
 
 /// Data parsed from a separate validators file (pointed to by `validators_file`

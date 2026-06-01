@@ -10,8 +10,8 @@
 //! - **Schema-side `OptionalT` wrappers** for enum and tagged types live next to their
 //!   schema definitions n `schema/{enums,database,diagnostics,server}.rs` and are
 //!   re-imported here so the bridge can resolve them.
-//! - **Parse entry points** (`parse_from_file`, `parse_from_str`) and `ParseOutcome`
-//!   complete the bridge surface.
+//! - **Parse entry points** (`parse_from_file`, `parse_from_str`) and `ParseOutcome` /
+//!   `FinalizeOutcome` complete the bridge surface.
 //! - **Tests** for primitive wrappers live in `optional.rs`; tests for enum/
 //!   tagged wrappers live in the same file as their types.
 
@@ -20,9 +20,10 @@
 mod optional;
 mod parse;
 pub use optional::*;
-use parse::{parse_from_file, parse_from_str};
+use parse::{finalize, parse_from_file, parse_from_str};
 
-use crate::error::{ParseError, ParseOutcome};
+use crate::config_builder::ConfigBuilder;
+use crate::error::{FinalizeOutcome, ParseError, ParseOutcome};
 use crate::schema::Config;
 use crate::schema::database::{
     LedgerTxTables, OptionalJournalMode, OptionalNodeDb, OptionalSafetyLevel, OptionalSqdbBackend,
@@ -41,7 +42,6 @@ use crate::schema::reduce_relay::ReduceRelay;
 use crate::schema::server::{OptionalPortLimit, PortConfig, Server};
 use crate::schema::transaction_queue::TransactionQueue;
 use crate::schema::voting::Voting;
-use crate::LoadOptions;
 
 // cxx-bridge generates wrapper code that requires explicit lifetimes on
 // `unsafe fn` returning `Result<&'a T>` — elision causes a borrow-check
@@ -142,6 +142,17 @@ mod bridge {
     enum NodeDbKind {
         NuDb,
         RocksDb,
+    }
+
+    // ----- CLI-derived startup mode (mirrors Main.cpp StartUpType) -----
+
+    enum StartUpType {
+        Normal,
+        Fresh,
+        Load,
+        LoadFile,
+        Replay,
+        Network,
     }
 
     // ----- Config format discriminant (passed to parse_from_str) -----
@@ -271,15 +282,33 @@ mod bridge {
         type Crawl;
         type Vl;
 
-        // ----- Parse outcome (std::expected analogue) -----
+        // ----- Parse outcome (std::expected analogue, carries ConfigBuilder) -----
         type ParseOutcome;
 
-        // ----- LoadOptions: opaque type with constructor and setters -----
-        type LoadOptions;
-        fn load_options_new() -> Box<LoadOptions>;
-        fn set_standalone(self: &mut LoadOptions, value: bool);
-        fn set_quorum_override(self: &mut LoadOptions, value: u32);
-        fn set_config_dir(self: &mut LoadOptions, path: &str);
+        // ----- Finalize outcome (std::expected analogue, carries Config) -----
+        type FinalizeOutcome;
+
+        // ----- ConfigBuilder: opaque type with CLI flag setters -----
+        type ConfigBuilder;
+        fn set_standalone(self: &mut ConfigBuilder, value: bool);
+        fn set_quiet(self: &mut ConfigBuilder, value: bool);
+        fn set_silent(self: &mut ConfigBuilder, value: bool);
+        fn set_quorum(self: &mut ConfigBuilder, value: u32);
+        fn set_start(self: &mut ConfigBuilder, value: bool);
+        fn set_ledger(self: &mut ConfigBuilder, value: &str);
+        fn set_ledgerfile(self: &mut ConfigBuilder, value: &str);
+        fn set_load(self: &mut ConfigBuilder, value: bool);
+        fn set_net(self: &mut ConfigBuilder, value: bool);
+        fn set_replay(self: &mut ConfigBuilder, value: bool);
+        fn set_trap_tx_hash(self: &mut ConfigBuilder, value: &str);
+        fn set_valid(self: &mut ConfigBuilder, value: bool);
+        fn set_import(self: &mut ConfigBuilder, value: bool);
+        fn set_force_ledger_present_range(self: &mut ConfigBuilder, value: &str);
+        fn set_rpc_ip(self: &mut ConfigBuilder, value: &str);
+        fn set_rpc_port(self: &mut ConfigBuilder, value: u16);
+        fn set_nodeid(self: &mut ConfigBuilder, value: &str);
+        fn set_newnodeid(self: &mut ConfigBuilder, value: bool);
+        fn had_trailing_comments(self: &ConfigBuilder) -> bool;
 
         // ----- Config: bootstrap (creates dirs) -----
         fn bootstrap(self: &Config) -> Result<()>;
@@ -292,21 +321,28 @@ mod bridge {
         // These always succeed at the FFI boundary — errors are carried inside
         // the returned `ParseOutcome`. The C++ side discriminates via
         // `has_value()` / `has_error()` and then calls `value()` or `error()`.
-        fn parse_from_str(content: &str, format: ConfigFormat, opts: &LoadOptions)
-            -> Box<ParseOutcome>;
-        fn parse_from_file(path: &str, opts: &LoadOptions) -> Box<ParseOutcome>;
+        fn parse_from_str(content: &str, format: ConfigFormat) -> Box<ParseOutcome>;
+        fn parse_from_file(path: &str) -> Box<ParseOutcome>;
+
+        // ----- Finalize: applies CLI flags, normalize, validate -----
+        //
+        // Takes ConfigBuilder by value (via Box).  Returns FinalizeOutcome.
+        fn finalize(b: Box<ConfigBuilder>) -> Box<FinalizeOutcome>;
 
         // ----- ParseOutcome methods -----
         //
-        // `value()` and `error()` use cxx `Result<T>` so that misuse
-        // (calling `value()` on an error, or `error()` on a success) throws
-        // a C++ exception — same semantics as `std::expected::value()`
-        // throwing `bad_expected_access` on `unexpected`.
+        // `value()` returns a ConfigBuilder (not a Config).
         fn has_value(self: &ParseOutcome) -> bool;
         fn has_error(self: &ParseOutcome) -> bool;
-        fn had_trailing_comments(self: &ParseOutcome) -> bool;
-        fn value(self: &mut ParseOutcome) -> Result<Box<Config>>;
+        fn value(self: &mut ParseOutcome) -> Result<Box<ConfigBuilder>>;
         fn error(self: &ParseOutcome) -> Result<String>;
+
+        // ----- FinalizeOutcome methods -----
+        fn has_value(self: &FinalizeOutcome) -> bool;
+        fn has_error(self: &FinalizeOutcome) -> bool;
+        fn had_trailing_comments(self: &FinalizeOutcome) -> bool;
+        fn value(self: &mut FinalizeOutcome) -> Result<Box<Config>>;
+        fn error(self: &FinalizeOutcome) -> Result<String>;
 
         // ----- Config: top-level scalars -----
         fn network_quorum(self: &Config) -> Box<OptionalU32>;
@@ -365,6 +401,18 @@ mod bridge {
         fn node_size(self: &Config) -> Box<OptionalNodeSize>;
         fn node_db(self: &Config) -> Box<OptionalNodeDb>;
         fn import_db(self: &Config) -> Box<OptionalNodeDb>;
+
+        // ----- Config: CLI-derived field getters -----
+        fn standalone(self: &Config) -> bool;
+        fn start_up(self: &Config) -> StartUpType;
+        fn do_import(self: &Config) -> bool;
+        fn start_valid(self: &Config) -> bool;
+        fn start_ledger(self: &Config) -> Box<OptionalString>;
+        fn trap_tx_hash(self: &Config) -> Box<OptionalString>;
+        fn rpc_ip(self: &Config) -> Box<OptionalString>;
+        fn has_forced_ledger_range(self: &Config) -> bool;
+        fn forced_ledger_range_min(self: &Config) -> u32;
+        fn forced_ledger_range_max(self: &Config) -> u32;
 
         // ----- Config: nested tables -----
         //
@@ -545,45 +593,100 @@ fn detect_config_path_from_env() -> Box<OptionalString> {
     ))
 }
 
-/// Construct a new default [`LoadOptions`] on the heap.
-///
-/// C++ callers use this as the constructor for the opaque `LoadOptions` type.
-fn load_options_new() -> Box<LoadOptions> {
-    Box::new(LoadOptions::default())
+// ---- Config: CLI-derived field getters (hand-written) ----
+
+impl Config {
+    /// Whether the node was started in `--standalone` mode.
+    pub fn standalone(&self) -> bool {
+        self.standalone
+    }
+
+    /// Startup mode (derived from CLI flags).
+    pub fn start_up(&self) -> bridge::StartUpType {
+        use crate::schema::enums::StartUpType as RustStartUp;
+        match self.start_up {
+            RustStartUp::Normal => bridge::StartUpType::Normal,
+            RustStartUp::Fresh => bridge::StartUpType::Fresh,
+            RustStartUp::Load => bridge::StartUpType::Load,
+            RustStartUp::LoadFile => bridge::StartUpType::LoadFile,
+            RustStartUp::Replay => bridge::StartUpType::Replay,
+            RustStartUp::Network => bridge::StartUpType::Network,
+        }
+    }
+
+    /// Whether `--import` was set.
+    pub fn do_import(&self) -> bool {
+        self.do_import
+    }
+
+    /// Whether `--valid` was set.
+    pub fn start_valid(&self) -> bool {
+        self.start_valid
+    }
+
+    /// Starting ledger hash/sequence (`--ledger` / `--ledgerfile`).
+    pub fn start_ledger(&self) -> Box<OptionalString> {
+        Box::new(self.start_ledger.clone().into())
+    }
+
+    /// Transaction hash for replay trapping (`--trap_tx_hash`).
+    pub fn trap_tx_hash(&self) -> Box<OptionalString> {
+        Box::new(self.trap_tx_hash.clone().into())
+    }
+
+    /// RPC destination IP override (`--rpc_ip`).
+    pub fn rpc_ip(&self) -> Box<OptionalString> {
+        Box::new(self.rpc_ip.clone().into())
+    }
+
+    /// Whether `--force_ledger_present_range` was set.
+    pub fn has_forced_ledger_range(&self) -> bool {
+        self.forced_ledger_range_present.is_some()
+    }
+
+    /// Minimum of the forced ledger present range.  Returns `0` if unset.
+    pub fn forced_ledger_range_min(&self) -> u32 {
+        self.forced_ledger_range_present.map_or(0, |(min, _)| min)
+    }
+
+    /// Maximum of the forced ledger present range.  Returns `0` if unset.
+    pub fn forced_ledger_range_max(&self) -> u32 {
+        self.forced_ledger_range_present.map_or(0, |(_, max)| max)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn default_opts() -> Box<LoadOptions> {
-        load_options_new()
-    }
-
+    /// Parse content → builder, apply no CLI flags, finalize → Config.
     fn ok_outcome(s: &str) -> Box<Config> {
-        let opts = default_opts();
-        let mut outcome = super::parse_from_str(s, bridge::ConfigFormat::Toml, &opts);
+        let mut outcome = super::parse_from_str(s, bridge::ConfigFormat::Toml);
         assert!(
             outcome.has_value(),
             "parse failed: {}",
             outcome.error().unwrap_or_default()
         );
-        outcome.value().expect("has_value=true")
+        let builder = outcome.value().expect("has_value=true");
+        let mut fin = finalize(builder);
+        assert!(
+            fin.has_value(),
+            "finalize failed: {}",
+            fin.error().unwrap_or_default()
+        );
+        fin.value().expect("has_value=true")
     }
 
     #[test]
     fn parse_outcome_carries_value() {
-        let opts = default_opts();
-        let outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml, &opts);
+        let outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml);
         assert!(outcome.has_value());
         assert!(!outcome.has_error());
     }
 
     #[test]
     fn parse_outcome_carries_error() {
-        let opts = default_opts();
-        let outcome =
-            super::parse_from_str("not_a_real_key = 1", bridge::ConfigFormat::Toml, &opts);
+        let outcome = super::parse_from_str("not_a_real_key = 1", bridge::ConfigFormat::Toml);
         assert!(!outcome.has_value());
         assert!(outcome.has_error());
         let msg = outcome.error().expect("has_error=true");
@@ -592,26 +695,42 @@ mod tests {
 
     #[test]
     fn parse_outcome_value_throws_on_error_arm() {
-        let opts = default_opts();
-        let mut outcome =
-            super::parse_from_str("not_a_real_key = 1", bridge::ConfigFormat::Toml, &opts);
+        let mut outcome = super::parse_from_str("not_a_real_key = 1", bridge::ConfigFormat::Toml);
         assert!(outcome.value().is_err());
     }
 
     #[test]
     fn parse_outcome_error_throws_on_value_arm() {
-        let opts = default_opts();
-        let outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml, &opts);
+        let outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml);
         assert!(outcome.error().is_err());
     }
 
     #[test]
     fn parse_outcome_value_consumed_once() {
-        let opts = default_opts();
-        let mut outcome =
-            super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml, &opts);
+        let mut outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml);
         assert!(outcome.value().is_ok());
         assert!(outcome.value().is_err());
+    }
+
+    #[test]
+    fn finalize_outcome_carries_value() {
+        let mut outcome = super::parse_from_str("network_quorum = 3", bridge::ConfigFormat::Toml);
+        let builder = outcome.value().expect("parse ok");
+        let fin = finalize(builder);
+        assert!(fin.has_value());
+        assert!(!fin.has_error());
+    }
+
+    #[test]
+    fn finalize_outcome_carries_error_on_invalid_cli() {
+        let mut outcome = super::parse_from_str("", bridge::ConfigFormat::Toml);
+        let mut builder = outcome.value().expect("parse ok");
+        builder.set_quorum(0); // invalid
+        let fin = finalize(builder);
+        assert!(!fin.has_value());
+        assert!(fin.has_error());
+        let msg = fin.error().expect("has_error=true");
+        assert!(msg.contains("quorum"), "{msg}");
     }
 
     #[test]
@@ -682,11 +801,66 @@ mod tests {
     }
 
     #[test]
-    fn load_options_setters_work() {
-        let mut opts = load_options_new();
-        opts.set_standalone(true);
-        opts.set_quorum_override(5);
-        assert!(opts.standalone);
-        assert_eq!(opts.quorum_override, Some(5));
+    fn cli_flags_standalone_via_builder() {
+        let mut outcome = super::parse_from_str("", bridge::ConfigFormat::Toml);
+        let mut builder = outcome.value().expect("parse ok");
+        builder.set_standalone(true);
+        let mut fin = finalize(builder);
+        let cfg = fin.value().expect("finalize ok");
+        assert!(cfg.standalone());
+    }
+
+    #[test]
+    fn cli_flags_do_import_via_builder() {
+        let mut outcome = super::parse_from_str("", bridge::ConfigFormat::Toml);
+        let mut builder = outcome.value().expect("parse ok");
+        builder.set_import(true);
+        let mut fin = finalize(builder);
+        let cfg = fin.value().expect("finalize ok");
+        assert!(cfg.do_import());
+    }
+
+    #[test]
+    fn cli_flags_start_valid_via_builder() {
+        let mut outcome = super::parse_from_str("", bridge::ConfigFormat::Toml);
+        let mut builder = outcome.value().expect("parse ok");
+        builder.set_valid(true);
+        let mut fin = finalize(builder);
+        let cfg = fin.value().expect("finalize ok");
+        assert!(cfg.start_valid());
+    }
+
+    #[test]
+    fn cli_flags_start_up_fresh_via_builder() {
+        let mut outcome = super::parse_from_str("", bridge::ConfigFormat::Toml);
+        let mut builder = outcome.value().expect("parse ok");
+        builder.set_start(true);
+        let mut fin = finalize(builder);
+        let cfg = fin.value().expect("finalize ok");
+        assert!(matches!(cfg.start_up(), bridge::StartUpType::Fresh));
+    }
+
+    #[test]
+    fn cli_flags_forced_ledger_range_via_builder() {
+        let mut outcome = super::parse_from_str("", bridge::ConfigFormat::Toml);
+        let mut builder = outcome.value().expect("parse ok");
+        builder.set_force_ledger_present_range("100,200");
+        let mut fin = finalize(builder);
+        let cfg = fin.value().expect("finalize ok");
+        assert!(cfg.has_forced_ledger_range());
+        assert_eq!(cfg.forced_ledger_range_min(), 100);
+        assert_eq!(cfg.forced_ledger_range_max(), 200);
+    }
+
+    #[test]
+    fn cli_flags_rpc_ip_via_builder() {
+        let mut outcome = super::parse_from_str("", bridge::ConfigFormat::Toml);
+        let mut builder = outcome.value().expect("parse ok");
+        builder.set_rpc_ip("127.0.0.1:5005");
+        let mut fin = finalize(builder);
+        let cfg = fin.value().expect("finalize ok");
+        let rpc = cfg.rpc_ip();
+        assert!(rpc.has_value());
+        assert_eq!(rpc.value().unwrap(), "127.0.0.1:5005");
     }
 }

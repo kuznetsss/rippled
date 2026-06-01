@@ -6,6 +6,28 @@
 use crate::ffi;
 use serde::{Deserialize, Serialize};
 
+/// Startup mode, derived from CLI flags by [`Config::apply_cli_flags`].
+///
+/// This type is NOT read from the config file — it is populated from the
+/// command line only and therefore marked `#[serde(skip)]` on `Config`.
+/// Mirrors `StartUpType` in `src/xrpld/app/main/Main.cpp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StartUpType {
+    /// Normal startup (default).
+    #[default]
+    Normal,
+    /// `--start`: start with a fresh empty ledger.
+    Fresh,
+    /// `--load` / `fast_load` / `--ledger` (without `--replay`): load a ledger.
+    Load,
+    /// `--ledgerfile`: load ledger from a file.
+    LoadFile,
+    /// `--ledger --replay`: replay the specified ledger.
+    Replay,
+    /// `--net`: network startup mode.
+    Network,
+}
+
 /// `ledger_history`: integer count, or `"full"` / `"none"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
@@ -307,8 +329,10 @@ mod tests {
     use crate::ffi::{FetchDepthKind, LedgerHistoryKind, NetworkIdKind, NodeSizeKind, RelayMode};
 
     fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
-        let (cfg, _) = crate::parse_from_str(s, crate::ConfigFormat::Toml, crate::LoadOptions::default())
-            .expect("parse succeeded");
+        let (cfg, _) = crate::parse_from_str(s, crate::ConfigFormat::Toml)
+            .expect("parse succeeded")
+            .finalize()
+            .expect("finalize succeeded");
         Box::new(cfg)
     }
 

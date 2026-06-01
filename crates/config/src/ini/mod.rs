@@ -215,6 +215,16 @@ pub fn from_basic_config(bc: &BasicConfig) -> Result<Config, ParseError> {
         voting:           build_voting(bc)?,
         crawl:            build_crawl(bc)?,  // 5. [crawl] value-line lift
         vl:               build_vl(bc)?,     // 6. [vl] enable alias
+
+        // CLI-derived fields — always default at parse time; set by apply_cli_flags.
+        standalone:                 false,
+        start_up:                   Default::default(),
+        start_ledger:               None,
+        do_import:                  false,
+        start_valid:                false,
+        trap_tx_hash:               None,
+        forced_ledger_range_present: None,
+        rpc_ip:                     None,
     })
 }
 

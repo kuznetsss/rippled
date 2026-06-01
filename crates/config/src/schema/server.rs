@@ -186,8 +186,10 @@ mod tests {
     use crate::ffi::{PortLimitKind, Protocol};
 
     fn ok_outcome(s: &str) -> Box<crate::schema::Config> {
-        let (cfg, _) = crate::parse_from_str(s, crate::ConfigFormat::Toml, crate::LoadOptions::default())
-            .expect("parse succeeded");
+        let (cfg, _) = crate::parse_from_str(s, crate::ConfigFormat::Toml)
+            .expect("parse succeeded")
+            .finalize()
+            .expect("finalize succeeded");
         Box::new(cfg)
     }
 

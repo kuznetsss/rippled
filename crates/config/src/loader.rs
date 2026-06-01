@@ -1,9 +1,9 @@
 use std::fs;
 use std::path::Path;
 
+use crate::config_builder::ConfigBuilder;
 use crate::error::ParseError;
 use crate::ini::parse_ini;
-use crate::load_options::LoadOptions;
 use crate::schema::Config;
 
 /// Recognised config file formats.
@@ -71,74 +71,66 @@ pub(crate) fn parse_from_ini_str(s: &str) -> Result<(Config, IniWarnings), Parse
 }
 
 // ---------------------------------------------------------------------------
-// Public parse entry points
+// Public parse entry points — return a ConfigBuilder (not yet finalized)
 // ---------------------------------------------------------------------------
 
-/// Parse a `Config` from an in-memory document of the given format, then run
-/// normalise and validate exactly once.
+/// Parse a `Config` from an in-memory document of the given format.
+///
+/// Returns a [`ConfigBuilder`] that the caller can configure with CLI flags
+/// before calling [`ConfigBuilder::finalize`] to run normalize + validate.
 ///
 /// Relative paths in the config (e.g. `database_path`, `debug_logfile`,
-/// `validators_file`) are resolved against `opts.config_dir`; leave it
-/// unset for in-memory configs that don't reference relative paths.
+/// `validators_file`) are resolved against the builder's `config_dir` at
+/// finalize time; leave `config_dir` unset (via this function) for in-memory
+/// configs that don't reference relative paths.
 ///
-/// Returns `(Config, IniWarnings)`.  For TOML, `had_trailing_comments` is
-/// always `false`.
-pub fn parse_from_str(
-    content: &str,
-    format: ConfigFormat,
-    opts: LoadOptions,
-) -> Result<(Config, IniWarnings), ParseError> {
-    let (mut cfg, warnings) = match format {
+/// For TOML, `had_trailing_comments` is always `false`.
+pub fn parse_from_str(content: &str, format: ConfigFormat) -> Result<ConfigBuilder, ParseError> {
+    let (cfg, warnings) = match format {
         ConfigFormat::Toml => (parse_from_toml_str(content)?, IniWarnings::default()),
         ConfigFormat::Ini => parse_from_ini_str(content)?,
     };
-    cfg.normalize(&opts)?;
-    cfg.validate()?;
-    Ok((cfg, warnings))
+    Ok(ConfigBuilder::new(cfg, None, warnings))
 }
 
-/// Read a config file from disk and dispatch to [`parse_from_str`] based on
-/// the file extension (case-insensitive).
+/// Read a config file from disk and return a [`ConfigBuilder`].
+///
+/// The format is detected from the file extension (case-insensitive):
 ///
 /// * `.toml`                  → TOML parser
 /// * `.ini`, `.cfg`, `.txt`   → legacy INI parser
 /// * anything else / missing  → [`ParseError::UnsupportedFormat`]
 ///
-/// `opts.config_dir` is set to the file's parent directory so relative paths
-/// in the config resolve correctly; any value the caller had set is overwritten.
+/// The builder's `config_dir` is set to the file's parent directory so
+/// relative paths in the config resolve correctly at finalize time.
 ///
-/// Returns `(Config, IniWarnings)`.  For TOML files `had_trailing_comments`
-/// is always `false`.
-pub fn parse_from_file<P: AsRef<Path>>(
-    path: P,
-    mut opts: LoadOptions,
-) -> Result<(Config, IniWarnings), ParseError> {
+/// For TOML files `had_trailing_comments` is always `false`.
+pub fn parse_from_file<P: AsRef<Path>>(path: P) -> Result<ConfigBuilder, ParseError> {
     let path = path.as_ref();
     let contents = fs::read_to_string(path)?;
     let format = ConfigFormat::from_path(path)?;
-    opts.config_dir = path.parent().map(Path::to_path_buf);
-    parse_from_str(&contents, format, opts)
+    let config_dir = path.parent().map(Path::to_path_buf);
+    let (cfg, warnings) = match format {
+        ConfigFormat::Toml => (parse_from_toml_str(&contents)?, IniWarnings::default()),
+        ConfigFormat::Ini => parse_from_ini_str(&contents)?,
+    };
+    Ok(ConfigBuilder::new(cfg, config_dir, warnings))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn default_opts() -> LoadOptions {
-        LoadOptions::default()
-    }
-
     #[test]
     fn parse_from_str_toml_minimal() {
-        let (cfg, _) =
-            parse_from_str("network_quorum = 3", ConfigFormat::Toml, default_opts()).unwrap();
+        let builder = parse_from_str("network_quorum = 3", ConfigFormat::Toml).unwrap();
+        let (cfg, _) = builder.finalize().unwrap();
         assert_eq!(cfg.network_quorum, Some(3));
     }
 
     #[test]
     fn parse_from_str_surfaces_parse_errors() {
-        let err =
-            parse_from_str("not_a_real_key = 1", ConfigFormat::Toml, default_opts()).unwrap_err();
+        let err = parse_from_str("not_a_real_key = 1", ConfigFormat::Toml).unwrap_err();
         assert!(matches!(err, ParseError::Toml(_)), "got {err:?}");
     }
 }

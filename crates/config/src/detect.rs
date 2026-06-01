@@ -62,7 +62,7 @@ pub fn detect_config_path_from_env() -> Option<PathBuf> {
 ///
 /// Not exposed via FFI — C++ has its own equivalent (`getMemorySize` +
 /// `hardware_concurrency`).  Rust callers that need autodetect call this
-/// explicitly and pass the result via `LoadOptions` or set `Config.node_size`.
+/// explicitly and set `Config.node_size`.
 #[allow(dead_code)]
 pub fn detect_node_size(standalone: bool) -> NodeSize {
     if standalone {

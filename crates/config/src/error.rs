@@ -3,8 +3,9 @@
 
 use std::io;
 
-use crate::schema::Config;
 use crate::IniWarnings;
+use crate::config_builder::ConfigBuilder;
+use crate::schema::Config;
 
 /// Errors returned by the config parsers.
 #[derive(Debug)]
@@ -72,7 +73,9 @@ impl std::error::Error for ParseError {
         match self {
             ParseError::Io(e) => Some(e),
             ParseError::Toml(e) => Some(e),
-            ParseError::Ini(_) | ParseError::UnsupportedFormat(_) | ParseError::DuplicateValue(_) => None,
+            ParseError::Ini(_)
+            | ParseError::UnsupportedFormat(_)
+            | ParseError::DuplicateValue(_) => None,
         }
     }
 }
@@ -91,10 +94,11 @@ impl From<toml::de::Error> for ParseError {
 
 /// `std::expected`-shaped wrapper around the result of a parse call.
 ///
-/// Exposed across the FFI boundary as an opaque type. The C++ side calls
-/// `has_value()` / `has_error()` to discriminate, then `value()` or
-/// `error()` to retrieve. Accessing the wrong arm throws — programmer error,
-/// same semantics as `std::expected::value()` on an unexpected.
+/// Exposed across the FFI boundary as an opaque type.  The C++ side calls
+/// `has_value()` / `has_error()` to discriminate, then `value()` (→ a
+/// `ConfigBuilder`) or `error()` to retrieve.  Accessing the wrong arm
+/// throws — programmer error, same semantics as `std::expected::value()` on
+/// an unexpected.
 ///
 /// `had_trailing_comments()` returns `true` when the parsed file was an INI
 /// file that contained trailing `#` comments (post-stripping).  Always
@@ -104,21 +108,64 @@ impl From<toml::de::Error> for ParseError {
 /// receiver: `value()` has to take `&mut self`, so the move-out is done with
 /// `Option::take`. Calling `value()` a second time throws (the slot is empty).
 pub struct ParseOutcome {
+    inner: Option<Result<Box<ConfigBuilder>, ParseError>>,
+}
+
+impl ParseOutcome {
+    /// Wrap a parse `Result<ConfigBuilder>` into an outcome handle.
+    pub fn from_builder_result(result: Result<ConfigBuilder, ParseError>) -> Box<Self> {
+        Box::new(Self {
+            inner: Some(result.map(Box::new)),
+        })
+    }
+
+    pub fn has_value(&self) -> bool {
+        matches!(&self.inner, Some(Ok(_)))
+    }
+
+    pub fn has_error(&self) -> bool {
+        matches!(&self.inner, Some(Err(_)))
+    }
+
+    /// Move the `ConfigBuilder` out of the outcome.  Throws (via cxx) if
+    /// `has_value()` is false, or if `value()` was already called once.
+    pub fn value(&mut self) -> Result<Box<ConfigBuilder>, String> {
+        match self.inner.take() {
+            Some(Ok(builder)) => Ok(builder),
+            Some(Err(e)) => {
+                self.inner = Some(Err(e));
+                Err("ParseOutcome::value() called on an error result".into())
+            }
+            None => Err("ParseOutcome::value() called after value() already consumed it".into()),
+        }
+    }
+
+    /// Return the error message.  Throws (via cxx) if `has_error()` is false.
+    pub fn error(&self) -> Result<String, String> {
+        match &self.inner {
+            Some(Err(e)) => Ok(e.to_string()),
+            Some(Ok(_)) => Err("ParseOutcome::error() called on a successful result".into()),
+            None => Err("ParseOutcome::error() called after value() consumed the result".into()),
+        }
+    }
+}
+
+/// `std::expected`-shaped wrapper around the result of [`finalize`].
+///
+/// Exposed across the FFI boundary as an opaque type.  Mirrors what
+/// `ParseOutcome` used to be, but carries a finalized `Config` instead of
+/// a builder, plus the `IniWarnings`.
+///
+/// `had_trailing_comments()` and `value()` / `error()` follow the same
+/// semantics as `ParseOutcome`.
+pub struct FinalizeOutcome {
     inner: Option<Result<Box<Config>, ParseError>>,
     warnings: IniWarnings,
 }
 
-impl ParseOutcome {
-    /// Wrap a TOML parser's `Result` into an outcome handle (no warnings).
-    pub fn from_toml_result(result: Result<Config, ParseError>) -> Box<Self> {
-        Box::new(Self {
-            inner: Some(result.map(Box::new)),
-            warnings: IniWarnings::default(),
-        })
-    }
-
-    /// Wrap an INI parser's `Result` (includes warnings) into an outcome handle.
-    pub fn from_ini_result(result: Result<(Config, IniWarnings), ParseError>) -> Box<Self> {
+impl FinalizeOutcome {
+    /// Wrap a finalize `Result<(Config, IniWarnings)>` into an outcome handle.
+    pub fn from_result(result: Result<(Config, IniWarnings), ParseError>) -> Box<Self> {
         let (inner, warnings) = match result {
             Ok((cfg, w)) => (Ok(Box::new(cfg)), w),
             Err(e) => (Err(e), IniWarnings::default()),
@@ -137,32 +184,31 @@ impl ParseOutcome {
         matches!(&self.inner, Some(Err(_)))
     }
 
-    /// Returns `true` if the parse succeeded and the source was an INI file
-    /// that contained trailing comments.  Always `false` for TOML and errors.
+    /// Returns `true` if the source was an INI file with trailing comments.
     /// Survives `value()` consumption.
     pub fn had_trailing_comments(&self) -> bool {
         self.warnings.had_trailing_comments
     }
 
-    /// Move the parsed `Config` out of the outcome. Throws (via cxx) if
+    /// Move the finalized `Config` out of the outcome.  Throws (via cxx) if
     /// `has_value()` is false, or if `value()` was already called once.
     pub fn value(&mut self) -> Result<Box<Config>, String> {
         match self.inner.take() {
             Some(Ok(cfg)) => Ok(cfg),
             Some(Err(e)) => {
                 self.inner = Some(Err(e));
-                Err("ParseOutcome::value() called on an error result".into())
+                Err("FinalizeOutcome::value() called on an error result".into())
             }
-            None => Err("ParseOutcome::value() called after value() already consumed it".into()),
+            None => Err("FinalizeOutcome::value() called after value() already consumed it".into()),
         }
     }
 
-    /// Return the error message. Throws (via cxx) if `has_error()` is false.
+    /// Return the error message.  Throws (via cxx) if `has_error()` is false.
     pub fn error(&self) -> Result<String, String> {
         match &self.inner {
             Some(Err(e)) => Ok(e.to_string()),
-            Some(Ok(_)) => Err("ParseOutcome::error() called on a successful result".into()),
-            None => Err("ParseOutcome::error() called after value() consumed the result".into()),
+            Some(Ok(_)) => Err("FinalizeOutcome::error() called on a successful result".into()),
+            None => Err("FinalizeOutcome::error() called after value() consumed the result".into()),
         }
     }
 }

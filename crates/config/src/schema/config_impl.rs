@@ -1,4 +1,4 @@
-//! `impl Config` methods: normalise, validate, and bootstrap.
+//! `impl Config` methods: normalise, validate, bootstrap, and apply_cli_flags.
 //!
 //! These live here rather than in `lib.rs` so that the implementation is
 //! adjacent to the `Config` struct definition.
@@ -6,32 +6,162 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::ConfigFormat;
+use crate::cli_flags::CliFlags;
 use crate::error::ParseError;
 use crate::ini::parse_ini;
 use crate::schema::database::NodeDb;
-use crate::schema::enums::{LedgerHistory, LedgerHistoryName};
+use crate::schema::enums::{LedgerHistory, LedgerHistoryName, StartUpType};
 use crate::schema::server::Protocol;
 use crate::schema::{Config, ValidatorData};
-use crate::{ConfigFormat, LoadOptions};
 
 impl Config {
-    /// Perform all post-parse normalisation driven by [`LoadOptions`].
+    /// Apply CLI flags to the config, translating them into `Config` fields.
+    ///
+    /// Mirrors the `vm.contains(...)` cascade in `Main.cpp` lines 573–768.
+    /// Must be called before [`Config::normalize`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError::Ini`] for invalid flag combinations:
+    /// - `force_ledger_present_range` not exactly two comma-separated u32 values,
+    ///   or `min > max`.
+    /// - `trap_tx_hash` set without `replay`.
+    /// - `net` combined with `load` or `replay` startup mode.
+    /// - `quorum` set to `0`.
+    pub(crate) fn apply_cli_flags(&mut self, cli: CliFlags) -> Result<(), ParseError> {
+        // standalone
+        self.standalone = cli.standalone;
+
+        // force_ledger_present_range: parse "min,max"
+        if let Some(raw) = &cli.force_ledger_present_range {
+            let parts: Vec<&str> = raw.split(',').collect();
+            if parts.len() != 2 {
+                return Err(ParseError::Ini(
+                    "invalid 'force_ledger_present_range' parameter. The parameter must be \
+                     two numbers separated by a comma. The first number must be <= the second."
+                        .into(),
+                ));
+            }
+            let min: u32 = parts[0].trim().parse().map_err(|_| {
+                ParseError::Ini(
+                    "invalid 'force_ledger_present_range' parameter. The parameter must be \
+                     two numbers separated by a comma. The first number must be <= the second."
+                        .into(),
+                )
+            })?;
+            let max: u32 = parts[1].trim().parse().map_err(|_| {
+                ParseError::Ini(
+                    "invalid 'force_ledger_present_range' parameter. The parameter must be \
+                     two numbers separated by a comma. The first number must be <= the second."
+                        .into(),
+                )
+            })?;
+            if min > max {
+                return Err(ParseError::Ini(
+                    "invalid 'force_ledger_present_range' parameter. The parameter must be \
+                     two numbers separated by a comma. The first number must be <= the second."
+                        .into(),
+                ));
+            }
+            self.forced_ledger_range_present = Some((min, max));
+        }
+
+        // start → Fresh
+        if cli.start {
+            self.start_up = StartUpType::Fresh;
+        }
+
+        // import
+        if cli.import {
+            self.do_import = true;
+        }
+
+        // Determine the fast_load flag from node_db (mirrors C++ `config->FAST_LOAD`)
+        let fast_load = match &self.node_db {
+            Some(NodeDb::NuDb(opts)) => opts.common.fast_load.unwrap_or(false),
+            Some(NodeDb::RocksDb(opts)) => opts.common.fast_load.unwrap_or(false),
+            None => false,
+        };
+
+        // ledger / ledgerfile / load
+        if let Some(ledger) = cli.ledger {
+            self.start_ledger = Some(ledger);
+            if cli.replay {
+                self.start_up = StartUpType::Replay;
+                if let Some(ref hash) = cli.trap_tx_hash {
+                    self.trap_tx_hash = Some(hash.clone());
+                }
+            } else {
+                self.start_up = StartUpType::Load;
+            }
+        } else if let Some(ledger_file) = cli.ledger_file {
+            self.start_ledger = Some(ledger_file);
+            self.start_up = StartUpType::LoadFile;
+        } else if cli.load || fast_load {
+            self.start_up = StartUpType::Load;
+        }
+
+        // trap_tx_hash without replay → error
+        if cli.trap_tx_hash.is_some() && !cli.replay {
+            return Err(ParseError::Ini(
+                "Cannot use trap option without replay option".into(),
+            ));
+        }
+
+        // net (and NOT fast_load)
+        if cli.net && !fast_load {
+            if self.start_up == StartUpType::Load || self.start_up == StartUpType::Replay {
+                return Err(ParseError::Ini(
+                    "Net and load/replay options are incompatible".into(),
+                ));
+            }
+            self.start_up = StartUpType::Network;
+        }
+
+        // valid
+        if cli.valid {
+            self.start_valid = true;
+        }
+
+        // rpc_ip: store raw string; full endpoint parsing stays C++-side
+        if let Some(ip) = &cli.rpc_ip {
+            self.rpc_ip = Some(ip.clone());
+        }
+
+        // quorum: 0 is invalid
+        if let Some(q) = cli.quorum {
+            if q == 0 {
+                return Err(ParseError::Ini(
+                    "Invalid value specified for --quorum".into(),
+                ));
+            }
+            self.network_quorum = Some(q);
+        }
+
+        Ok(())
+    }
+
+    /// Perform all post-parse normalization.
+    ///
+    /// Must be called after [`Config::apply_cli_flags`] so that
+    /// `self.standalone` is already set when validators-file loading is gated.
     ///
     /// Responsibilities (in order):
-    /// 1. Load + merge `validators_file` (if set).
-    /// 2. Absolutize `validators_file` path (when `opts.config_dir` is `Some`).
+    /// 1. Load + merge `validators_file` (if set and NOT standalone).
+    /// 2. Absolutize `validators_file` path (when `config_dir` is `Some`).
     /// 3. Consolidate `validator_keys` → `validators`.
     /// 4. validator_list_threshold == 0 → `None` (C++ treats 0 as "auto").
-    /// 5. Apply `opts.quorum_override` → `network_quorum`.
-    /// 6. Apply `opts.standalone` → force `ledger_history = 0`.
-    /// 7. Set `path_search_max = 0` when `validation_seed` or `validator_token`
+    /// 5. Apply `self.standalone` → force `ledger_history = 0`.
+    /// 6. Set `path_search_max = 0` when `validation_seed` or `validator_token`
     ///    is set (mirrors C++ §3.3 rule 15).
-    /// 8. Absolutize `database_path` and `debug_logfile` against `opts.config_dir`.
-    pub(crate) fn normalize(&mut self, opts: &LoadOptions) -> Result<(), ParseError> {
-        let config_dir = opts.config_dir.as_deref();
-
+    /// 7. Absolutize `database_path` and `debug_logfile` against `config_dir`.
+    pub(crate) fn normalize(&mut self, config_dir: Option<&Path>) -> Result<(), ParseError> {
         // 1 & 2: validators_file load + merge + absolutize
-        if let Some(validators_path) = self.validators_file.take() {
+        // Skipped in standalone mode (mirrors C++ `load()` behaviour).
+        if !self.standalone
+            && let Some(validators_path) = self.validators_file.take()
+        {
             let validators_path = absolutize_path(&validators_path, config_dir);
 
             let v_contents = fs::read_to_string(&validators_path)?;
@@ -57,17 +187,12 @@ impl Config {
             self.validator_list_threshold = None;
         }
 
-        // 5: quorum_override
-        if let Some(q) = opts.quorum_override {
-            self.network_quorum = Some(q);
-        }
-
-        // 6: standalone → force ledger_history = 0
-        if opts.standalone {
+        // 5: standalone → force ledger_history = 0
+        if self.standalone {
             self.ledger_history = Some(LedgerHistory::Numeric(0));
         }
 
-        // 7: validation_seed or validator_token → PATH_SEARCH_MAX = 0
+        // 6: validation_seed or validator_token → PATH_SEARCH_MAX = 0
         // Only set to 0 if not already explicitly set in the config.
         if (self.validation_seed.is_some() || self.validator_token.is_some())
             && self.path_search_max.is_none()
@@ -75,7 +200,7 @@ impl Config {
             self.path_search_max = Some(0);
         }
 
-        // 8: absolutize database_path and debug_logfile
+        // 7: absolutize database_path and debug_logfile
         if let Some(ref p) = self.database_path.clone() {
             self.database_path = Some(absolutize_path(p, config_dir));
         }
@@ -340,21 +465,24 @@ pub(crate) fn absolutize_path(p: &Path, config_dir: Option<&Path>) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use crate::schema::enums::LedgerHistory;
-    use crate::{parse_from_file, parse_from_str, ConfigFormat, LoadOptions};
     use crate::error::ParseError;
     use crate::loader::parse_from_toml_str;
     use crate::schema::Config;
+    use crate::schema::enums::{LedgerHistory, StartUpType};
+    use crate::{ConfigFormat, parse_from_file, parse_from_str};
 
-    fn default_opts() -> LoadOptions {
-        LoadOptions::default()
+    /// Helper: parse TOML, apply no CLI flags, finalize.
+    fn parse_toml(s: &str) -> Result<Config, ParseError> {
+        let (cfg, _warnings) = parse_from_str(s, ConfigFormat::Toml)?.finalize()?;
+        Ok(cfg)
     }
 
-    fn parse_toml(s: &str) -> Result<Config, ParseError> {
-        let mut cfg: Config = toml::from_str(s)?;
-        cfg.normalize(&default_opts())?;
-        cfg.validate()?;
-        Ok(cfg)
+    /// Helper: parse from str and finalize with default (empty) CLI flags.
+    fn parse_str_finalize(
+        s: &str,
+        fmt: ConfigFormat,
+    ) -> Result<(Config, crate::loader::IniWarnings), ParseError> {
+        parse_from_str(s, fmt)?.finalize()
     }
 
     #[test]
@@ -365,16 +493,14 @@ mod tests {
 
     #[test]
     fn parse_from_str_toml_works() {
-        let (cfg, warnings) =
-            parse_from_str("network_quorum = 3", ConfigFormat::Toml, default_opts()).unwrap();
+        let (cfg, warnings) = parse_str_finalize("network_quorum = 3", ConfigFormat::Toml).unwrap();
         assert_eq!(cfg.network_quorum, Some(3));
         assert!(!warnings.had_trailing_comments);
     }
 
     #[test]
     fn parse_from_str_ini_works() {
-        let (cfg, warnings) =
-            parse_from_str("[network_quorum]\n3", ConfigFormat::Ini, default_opts()).unwrap();
+        let (cfg, warnings) = parse_str_finalize("[network_quorum]\n3", ConfigFormat::Ini).unwrap();
         assert_eq!(cfg.network_quorum, Some(3));
         assert!(!warnings.had_trailing_comments);
     }
@@ -392,7 +518,7 @@ mod tests {
         let toml_path = dir.join("example.toml");
         std::fs::write(&toml_path, "network_quorum = 7\n").unwrap();
 
-        let (cfg, warnings) = parse_from_file(&toml_path, default_opts()).unwrap();
+        let (cfg, warnings) = parse_from_file(&toml_path).unwrap().finalize().unwrap();
         assert_eq!(cfg.network_quorum, Some(7));
         assert!(!warnings.had_trailing_comments);
 
@@ -407,7 +533,7 @@ mod tests {
         let ini_path = dir.join("example.cfg");
         std::fs::write(&ini_path, "[network_quorum]\n3\n").unwrap();
 
-        let (cfg, _) = parse_from_file(&ini_path, default_opts()).unwrap();
+        let (cfg, _) = parse_from_file(&ini_path).unwrap().finalize().unwrap();
         assert_eq!(cfg.network_quorum, Some(3));
 
         std::fs::remove_file(&ini_path).unwrap();
@@ -416,7 +542,7 @@ mod tests {
 
     #[test]
     fn parse_from_file_io_error_is_typed() {
-        let err = parse_from_file("/nonexistent/path/to/xrpld.toml", default_opts()).unwrap_err();
+        let err = parse_from_file("/nonexistent/path/to/xrpld.toml").unwrap_err();
         assert!(matches!(err, ParseError::Io(_)), "got {err:?}");
     }
 
@@ -427,7 +553,7 @@ mod tests {
         let path = dir.join("xrpld.yaml");
         std::fs::write(&path, "").unwrap();
 
-        let err = parse_from_file(&path, default_opts()).unwrap_err();
+        let err = parse_from_file(&path).unwrap_err();
         assert!(
             matches!(err, ParseError::UnsupportedFormat(ref ext) if ext == "yaml"),
             "got {err:?}",
@@ -439,8 +565,7 @@ mod tests {
 
     #[test]
     fn parse_from_ini_str_minimal() {
-        let (cfg, warnings) =
-            parse_from_str("[network_quorum]\n3", ConfigFormat::Ini, default_opts()).unwrap();
+        let (cfg, warnings) = parse_str_finalize("[network_quorum]\n3", ConfigFormat::Ini).unwrap();
         assert_eq!(cfg.network_quorum, Some(3));
         assert!(!warnings.had_trailing_comments);
     }
@@ -449,8 +574,7 @@ mod tests {
     fn parse_from_ini_str_returns_ini_warnings() {
         // A trailing comment should surface in IniWarnings.
         let (_, warnings) =
-            parse_from_str("[network_quorum]\n3 # trailing", ConfigFormat::Ini, default_opts())
-                .unwrap();
+            parse_str_finalize("[network_quorum]\n3 # trailing", ConfigFormat::Ini).unwrap();
         assert!(warnings.had_trailing_comments);
     }
 
@@ -472,7 +596,7 @@ mod tests {
         )
         .unwrap();
 
-        let (cfg, _) = parse_from_file(&cfg_path, default_opts()).unwrap();
+        let (cfg, _) = parse_from_file(&cfg_path).unwrap().finalize().unwrap();
         // After consolidation, validators must include the original entry
         // plus the two from validator_keys.
         assert!(
@@ -520,7 +644,7 @@ mod tests {
         )
         .unwrap();
 
-        let (cfg, _) = parse_from_file(&cfg_path, default_opts()).unwrap();
+        let (cfg, _) = parse_from_file(&cfg_path).unwrap().finalize().unwrap();
         // The validators file threshold (2) must win.
         assert_eq!(
             cfg.validator_list_threshold,
@@ -548,7 +672,7 @@ mod tests {
         )
         .unwrap();
 
-        let (cfg, _) = parse_from_file(&cfg_path, default_opts()).unwrap();
+        let (cfg, _) = parse_from_file(&cfg_path).unwrap().finalize().unwrap();
         assert_eq!(
             cfg.validator_list_threshold, None,
             "threshold 0 should become None"
@@ -569,7 +693,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = parse_from_file(&cfg_path, default_opts()).unwrap_err();
+        let err = parse_from_file(&cfg_path).unwrap().finalize().unwrap_err();
         assert!(
             matches!(&err, ParseError::Ini(msg) if msg.contains("exceeds")),
             "expected threshold>keys error, got: {err:?}"
@@ -591,26 +715,21 @@ mod tests {
         )
         .unwrap();
 
-        let (cfg, _) = parse_from_file(&cfg_path, default_opts()).unwrap();
+        let (cfg, _) = parse_from_file(&cfg_path).unwrap().finalize().unwrap();
         assert_eq!(cfg.validator_list_threshold, Some(2));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // -----------------------------------------------------------------------
-    // LoadOptions: standalone forces ledger_history = 0
+    // CLI flags: standalone forces ledger_history = 0
     // -----------------------------------------------------------------------
 
     #[test]
     fn standalone_forces_ledger_history_zero() {
-        let mut opts = LoadOptions::default();
-        opts.set_standalone(true);
-        let (cfg, _) = parse_from_str(
-            r#"ledger_history = "full""#,
-            ConfigFormat::Toml,
-            opts,
-        )
-        .unwrap();
+        let mut builder = parse_from_str(r#"ledger_history = "full""#, ConfigFormat::Toml).unwrap();
+        builder.set_standalone(true);
+        let (cfg, _) = builder.finalize().unwrap();
         assert_eq!(
             cfg.ledger_history,
             Some(LedgerHistory::Numeric(0)),
@@ -620,26 +739,125 @@ mod tests {
 
     #[test]
     fn quorum_override_replaces_config_value() {
-        let mut opts = LoadOptions::default();
-        opts.set_quorum_override(7);
-        let (cfg, _) =
-            parse_from_str("network_quorum = 3", ConfigFormat::Toml, opts).unwrap();
+        let mut builder = parse_from_str("network_quorum = 3", ConfigFormat::Toml).unwrap();
+        builder.set_quorum(7);
+        let (cfg, _) = builder.finalize().unwrap();
         assert_eq!(cfg.network_quorum, Some(7));
     }
 
     #[test]
     fn validator_token_sets_path_search_max_zero() {
-        let (cfg, _) = parse_from_str(
-            r#"validator_token = "sometoken""#,
-            ConfigFormat::Toml,
-            default_opts(),
-        )
-        .unwrap();
+        let (cfg, _) =
+            parse_str_finalize(r#"validator_token = "sometoken""#, ConfigFormat::Toml).unwrap();
         assert_eq!(
             cfg.path_search_max,
             Some(0),
             "path_search_max must be 0 when validator_token is set"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_cli_flags: start_up types
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cli_start_flag_sets_fresh() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_start(true);
+        let (cfg, _) = builder.finalize().unwrap();
+        assert_eq!(cfg.start_up, StartUpType::Fresh);
+    }
+
+    #[test]
+    fn cli_ledger_without_replay_sets_load() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_ledger("abc123");
+        let (cfg, _) = builder.finalize().unwrap();
+        assert_eq!(cfg.start_up, StartUpType::Load);
+        assert_eq!(cfg.start_ledger.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn cli_ledger_with_replay_sets_replay() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_ledger("abc123");
+        builder.set_replay(true);
+        let (cfg, _) = builder.finalize().unwrap();
+        assert_eq!(cfg.start_up, StartUpType::Replay);
+    }
+
+    #[test]
+    fn cli_trap_without_replay_is_error() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_trap_tx_hash("deadbeef");
+        let err = builder.finalize().unwrap_err();
+        assert!(
+            matches!(&err, ParseError::Ini(msg) if msg.contains("trap")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cli_net_with_load_is_error() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_load(true);
+        builder.set_net(true);
+        let err = builder.finalize().unwrap_err();
+        assert!(
+            matches!(&err, ParseError::Ini(msg) if msg.contains("incompatible")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cli_quorum_zero_is_error() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_quorum(0);
+        let err = builder.finalize().unwrap_err();
+        assert!(
+            matches!(&err, ParseError::Ini(msg) if msg.contains("quorum")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cli_force_ledger_range_invalid_format_is_error() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_force_ledger_present_range("100");
+        let err = builder.finalize().unwrap_err();
+        assert!(matches!(&err, ParseError::Ini(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn cli_force_ledger_range_min_gt_max_is_error() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_force_ledger_present_range("200,100");
+        let err = builder.finalize().unwrap_err();
+        assert!(matches!(&err, ParseError::Ini(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn cli_force_ledger_range_valid() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_force_ledger_present_range("100,200");
+        let (cfg, _) = builder.finalize().unwrap();
+        assert_eq!(cfg.forced_ledger_range_present, Some((100, 200)));
+    }
+
+    #[test]
+    fn cli_import_sets_do_import() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_import(true);
+        let (cfg, _) = builder.finalize().unwrap();
+        assert!(cfg.do_import);
+    }
+
+    #[test]
+    fn cli_valid_sets_start_valid() {
+        let mut builder = parse_from_str("", ConfigFormat::Toml).unwrap();
+        builder.set_valid(true);
+        let (cfg, _) = builder.finalize().unwrap();
+        assert!(cfg.start_valid);
     }
 
     // -----------------------------------------------------------------------
@@ -716,11 +934,9 @@ mod tests {
 
     #[test]
     fn bootstrap_creates_database_path() {
-        let base =
-            std::env::temp_dir().join(format!("config-bootstrap-db-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("config-bootstrap-db-{}", std::process::id()));
         let cfg_toml = format!(r#"database_path = "{}""#, base.display());
-        let (cfg, _) =
-            parse_from_str(&cfg_toml, ConfigFormat::Toml, default_opts()).unwrap();
+        let (cfg, _) = parse_str_finalize(&cfg_toml, ConfigFormat::Toml).unwrap();
 
         assert!(!base.exists(), "dir should not exist yet");
         cfg.bootstrap().expect("bootstrap should succeed");
@@ -735,8 +951,7 @@ mod tests {
             std::env::temp_dir().join(format!("config-bootstrap-log-{}", std::process::id()));
         let log_path = base.join("logs").join("debug.log");
         let cfg_toml = format!(r#"debug_logfile = "{}""#, log_path.display());
-        let (cfg, _) =
-            parse_from_str(&cfg_toml, ConfigFormat::Toml, default_opts()).unwrap();
+        let (cfg, _) = parse_str_finalize(&cfg_toml, ConfigFormat::Toml).unwrap();
 
         assert!(!base.exists(), "dir should not exist yet");
         cfg.bootstrap().expect("bootstrap should succeed");
@@ -750,8 +965,7 @@ mod tests {
 
     #[test]
     fn bootstrap_no_paths_is_noop() {
-        let (cfg, _) =
-            parse_from_str("network_quorum = 3", ConfigFormat::Toml, default_opts()).unwrap();
+        let (cfg, _) = parse_str_finalize("network_quorum = 3", ConfigFormat::Toml).unwrap();
         cfg.bootstrap()
             .expect("bootstrap with no paths must succeed");
     }
