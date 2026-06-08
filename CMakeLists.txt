@@ -135,6 +135,7 @@ add_subdirectory(crates)
 include(XrplCore)
 include(XrplProtocolAutogen)
 include(XrplInstall)
+include(XrplPackaging)
 include(XrplValidatorKeys)
 
 if(tests)
