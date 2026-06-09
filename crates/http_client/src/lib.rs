@@ -1,4 +1,4 @@
-#[cxx::bridge(namespace = "rs::config")]
+#[cxx::bridge]
 mod ffi {
     extern "Rust" {
         fn add(left: u64, right: u64) -> u64;
