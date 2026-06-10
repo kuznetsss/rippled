@@ -29,6 +29,12 @@ function(add_xrpl_crate name)
     corrosion_add_cxxbridge(${name}_cxxbridge CRATE ${ARG_CRATE} FILES
                             ${ARG_FILES}
     )
+    # The generated bridge source may `#include` project headers referenced via
+    # cxx `include!()` (e.g. extern "C++" callback declarations). Let the
+    # codegen target see the public include root so those resolve.
+    target_include_directories(
+        ${name}_cxxbridge PRIVATE ${CMAKE_SOURCE_DIR}/include
+    )
     # Generated cxxbridge headers don't exist at configure time; CMake 3.28+
     # validates INTERFACE_SOURCES on consuming targets. Clear it to skip the
     # existence check — build-time ordering is enforced by the custom commands.
@@ -37,4 +43,4 @@ function(add_xrpl_crate name)
     target_link_libraries(xrpl_crates_cxxbridge INTERFACE ${name}_cxxbridge)
 endfunction()
 
-add_xrpl_crate(rs_http_client CRATE http_client FILES lib.rs)
+add_xrpl_crate(rs_http_client CRATE http_client FILES ffi.rs)
