@@ -3,7 +3,11 @@ members = ["http_client"]
 resolver = "3"
 
 [workspace.dependencies]
+anyhow = "1.0.102"
 cxx = { version = "1.0.194", features = ["c++20"] }
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["full"] }
+tokio-util = "0.7.18"
 
 [workspace.package]
 edition = "2024"
