@@ -5,7 +5,6 @@ edition.workspace = true
 
 [dependencies]
 cxx.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 
