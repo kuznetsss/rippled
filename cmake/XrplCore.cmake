@@ -138,6 +138,7 @@ target_link_libraries(
         xrpl.libxrpl.json
         xrpl.libxrpl.protocol
         xrpl.libxrpl.resource
+        xrpl_crates_cxxbridge
 )
 
 add_module(xrpl nodestore)

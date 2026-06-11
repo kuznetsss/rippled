@@ -58,13 +58,37 @@ mod bridge {
         body: Vec<u8>,
     }
 
+    /// Per-request error kinds delivered to `resume_http_request`.
+    ///
+    /// Distinct from the lifecycle [`ErrorCode`] (init/shutdown/enqueue):
+    /// these codes describe what went wrong *during* an in-flight HTTP request.
+    /// Mapped to `boost::system::errc` values on the C++ side.
+    enum RequestError {
+        /// Request completed successfully.
+        Ok,
+        /// The request timed out.
+        Timeout,
+        /// TCP connection could not be established.
+        Connect,
+        /// DNS resolution failed.
+        Dns,
+        /// TLS handshake or certificate error.
+        Tls,
+        /// Server returned an unexpected HTTP status.
+        BadStatus,
+        /// Response body exceeded `max_response_bytes`.
+        TooLarge,
+        /// Request was cancelled (e.g. runtime shutdown dropped the task).
+        Canceled,
+    }
+
     /// The outcome of an HTTP request, delivered to `resume_http_request`.
     ///
-    /// On success `code == ErrorCode::Ok` and `response` is populated.
+    /// On success `code == RequestError::Ok` and `response` is populated.
     /// On failure `code` indicates the error kind and `message` carries a
     /// human-readable description.
     struct RequestResult {
-        code: ErrorCode,
+        code: RequestError,
         message: String,
         response: Response,
     }
@@ -101,7 +125,7 @@ mod bridge {
     }
 }
 
-pub(crate) use bridge::{ErrorCode, HttpHeader, Request, RequestResult, Response, Status};
+pub(crate) use bridge::{ErrorCode, HttpHeader, Request, RequestError, RequestResult, Response, Status};
 
 fn init_tokio_runtime(threads_num: usize) -> Status {
     Runtime::init(threads_num).into()
@@ -111,8 +135,72 @@ fn shutdown_tokio_runtime(timeout_ms: u64) -> Status {
     Runtime::shutdown(Duration::from_millis(timeout_ms)).into()
 }
 
+/// A drop guard that calls `resume_http_request` with `Canceled` if the
+/// async task is dropped before it completes normally.
+///
+/// Constructed as the *first* statement inside the spawned task body so that
+/// on enqueue failure (task never starts) the guard is never created and C++
+/// owns the failure path — preventing any double-completion.
+///
+/// Residual narrow race: a task that is enqueued but dropped before its first
+/// poll will trigger the `Drop` path. This is an accepted limitation for now;
+/// per-operation cancellation is deferred to a future iteration.
+struct CompletionGuard {
+    completion: usize,
+    disarmed: bool,
+}
+
+impl CompletionGuard {
+    fn new(completion: usize) -> Self {
+        Self {
+            completion,
+            disarmed: false,
+        }
+    }
+
+    /// Disarm and complete with the given result (happy path).
+    ///
+    /// # Safety
+    /// `completion` must be a valid pointer cast to `usize` that the C++ side
+    /// passed to `http_request`. C++ guarantees the pointed-to object outlives
+    /// this call.
+    unsafe fn complete(mut self, result: RequestResult) {
+        self.disarmed = true;
+        // SAFETY: forwarded from caller's safety contract.
+        unsafe { bridge::resume_http_request(self.completion, result) };
+    }
+}
+
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            // Task was dropped before completing — signal Canceled to C++.
+            let result = RequestResult {
+                code: RequestError::Canceled,
+                message: String::from("request task was dropped"),
+                response: Response {
+                    status: 0,
+                    headers: vec![],
+                    body: vec![],
+                },
+            };
+            // SAFETY: same contract as in `complete` — the C++ pointer is
+            // still valid because the task was either mid-flight (runtime
+            // still alive) or the runtime is shutting down and C++ holds the
+            // State until we call back.
+            unsafe { bridge::resume_http_request(self.completion, result) };
+        }
+    }
+}
+
 fn http_request(req: Request, completion: usize) -> Status {
     Runtime::spawn(async move {
+        // The guard MUST be the first thing created inside the task so that
+        // if this task is dropped (e.g. runtime shutdown_timeout) C++ is
+        // notified via Canceled.  On enqueue failure the task body never
+        // runs, so the guard is never constructed and C++ handles that path.
+        let guard = CompletionGuard::new(completion);
+
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let response = Response {
@@ -125,15 +213,14 @@ fn http_request(req: Request, completion: usize) -> Status {
         };
 
         let result = RequestResult {
-            code: ErrorCode::Ok,
+            code: RequestError::Ok,
             message: String::new(),
             response,
         };
 
-        // SAFETY: `completion` is a valid `*mut StubCompletion` (or equivalent
-        // C++ object) for the lifetime of this call; the C++ side ensures the
-        // object outlives the async task.
-        unsafe { bridge::resume_http_request(completion, result) };
+        // SAFETY: `completion` is a valid C++ completion-State pointer cast
+        // to `usize`; the C++ side guarantees the object outlives this call.
+        unsafe { guard.complete(result) };
     })
     .into()
 }
