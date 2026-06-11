@@ -272,7 +272,6 @@ if(xrpld)
         Xrpl::opts
         Xrpl::libs
         xrpl.libxrpl
-        xrpl_crates_cxxbridge
     )
     exclude_if_included(xrpld)
     # define a macro for tests that might need to

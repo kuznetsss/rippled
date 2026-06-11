@@ -125,7 +125,9 @@ mod bridge {
     }
 }
 
-pub(crate) use bridge::{ErrorCode, HttpHeader, Request, RequestError, RequestResult, Response, Status};
+pub(crate) use bridge::{
+    ErrorCode, HttpHeader, Request, RequestError, RequestResult, Response, Status,
+};
 
 fn init_tokio_runtime(threads_num: usize) -> Status {
     Runtime::init(threads_num).into()
