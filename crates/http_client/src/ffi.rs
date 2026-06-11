@@ -1,7 +1,7 @@
 use crate::runtime::Runtime;
 use std::time::Duration;
 
-#[cxx::bridge(namespace = "http_client")]
+#[cxx::bridge(namespace = "rs::http_client")]
 mod bridge {
     /// Flat, C-compatible mirror of [`crate::Error`]'s discriminants.
     ///

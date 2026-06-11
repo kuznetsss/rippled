@@ -9,7 +9,7 @@
 // complete.
 #include <cstddef>
 
-namespace http_client {
+namespace rs::http_client {
 
 // Forward declaration: full definition is in rs_http_client_cxxbridge/ffi.h.
 struct RequestResult;
@@ -26,6 +26,6 @@ struct RequestResult;
 ///       src/libxrpl/net/HTTPClientRust.cpp to keep the cxx bridge namespace
 ///       consistent with the linker symbol.
 void
-resume_http_request(::std::size_t completion, ::http_client::RequestResult result);
+resume_http_request(::std::size_t completion, ::rs::http_client::RequestResult result);
 
-}  // namespace http_client
+}  // namespace rs::http_client

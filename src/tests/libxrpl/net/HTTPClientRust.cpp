@@ -1,6 +1,6 @@
 #include <xrpl/net/HTTPClientRust.h>
 
-// Generated cxx bridge — http_client::init_tokio_runtime, etc.
+// Generated cxx bridge — rs::http_client::init_tokio_runtime, etc.
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 
@@ -30,11 +30,11 @@ protected:
     static void
     SetUpTestSuite()
     {
-        auto status = ::http_client::init_tokio_runtime(2);
+        auto status = ::rs::http_client::init_tokio_runtime(2);
         // AlreadyInitialized is fine if another test suite already called init.
         ASSERT_TRUE(
-            status.code == ::http_client::ErrorCode::Ok ||
-            status.code == ::http_client::ErrorCode::AlreadyInitialized)
+            status.code == ::rs::http_client::ErrorCode::Ok ||
+            status.code == ::rs::http_client::ErrorCode::AlreadyInitialized)
             << static_cast<std::string>(status.message);
     }
 
@@ -42,15 +42,15 @@ protected:
     TearDownTestSuite()
     {
         // Best-effort shutdown; ignore errors (e.g. already-shut-down).
-        ::http_client::shutdown_tokio_runtime(2000 /*ms*/);
+        ::rs::http_client::shutdown_tokio_runtime(2000 /*ms*/);
     }
 
     /// Build a minimal GET request to the given URL with a 5 s timeout.
-    static ::http_client::Request
+    static ::rs::http_client::Request
     makeRequest(std::string const& url)
     {
-        ::http_client::Request req;
-        req.method = ::http_client::HttpMethod::Get;
+        ::rs::http_client::Request req;
+        req.method = ::rs::http_client::HttpMethod::Get;
         // rust::String is assigned from std::string by copy, so no std::move.
         req.url = url;
         req.timeout_ms = 5000;
@@ -87,12 +87,12 @@ TEST_F(HTTPClientRustTest, BasicRequest)
     boost::asio::io_context ioc;
     bool done = false;
     boost::system::error_code resultEc;
-    ::http_client::Response resultResp;
+    ::rs::http_client::Response resultResp;
 
     HTTPClientRust::asyncRequest(
         ioc.get_executor(),
         makeRequest("http://example.com/test"),
-        [&](boost::system::error_code ec, ::http_client::Response resp) {
+        [&](boost::system::error_code ec, ::rs::http_client::Response resp) {
             resultEc = ec;
             resultResp = std::move(resp);
             done = true;
@@ -133,7 +133,7 @@ TEST_F(HTTPClientRustTest, HandlerOnIocThread)
     HTTPClientRust::asyncRequest(
         ioc.get_executor(),
         makeRequest("http://example.com/thread-test"),
-        [&](boost::system::error_code /*ec*/, ::http_client::Response /*r*/) {
+        [&](boost::system::error_code /*ec*/, ::rs::http_client::Response /*r*/) {
             handlerThreadId = std::this_thread::get_id();
             done = true;
         });
@@ -157,7 +157,7 @@ TEST_F(HTTPClientRustTest, UseFuture)
 {
     boost::asio::io_context ioc;
 
-    // use_future returns std::future<http_client::Response>.
+    // use_future returns std::future<rs::http_client::Response>.
     auto fut = HTTPClientRust::asyncRequest(
         ioc.get_executor(), makeRequest("http://example.com/future-test"), boost::asio::use_future);
 
@@ -165,7 +165,7 @@ TEST_F(HTTPClientRustTest, UseFuture)
     // while we wait on the future in the main thread.
     std::thread runner([&] { ioc.run(); });
 
-    ::http_client::Response result;
+    ::rs::http_client::Response result;
     ASSERT_NO_THROW(result = fut.get());
 
     runner.join();
@@ -183,9 +183,9 @@ TEST_F(HTTPClientRustTest, FailoverAllSucceed)
     boost::asio::io_context ioc;
     bool done = false;
     boost::system::error_code resultEc;
-    ::http_client::Response resultResp;
+    ::rs::http_client::Response resultResp;
 
-    std::vector<::http_client::Request> reqs;
+    std::vector<::rs::http_client::Request> reqs;
     reqs.push_back(makeRequest("http://site1.example.com/"));
     reqs.push_back(makeRequest("http://site2.example.com/"));
     reqs.push_back(makeRequest("http://site3.example.com/"));
@@ -193,7 +193,7 @@ TEST_F(HTTPClientRustTest, FailoverAllSucceed)
     HTTPClientRust::asyncRequestAny(
         ioc.get_executor(),
         std::move(reqs),
-        [&](boost::system::error_code ec, ::http_client::Response resp) {
+        [&](boost::system::error_code ec, ::rs::http_client::Response resp) {
             resultEc = ec;
             resultResp = std::move(resp);
             done = true;

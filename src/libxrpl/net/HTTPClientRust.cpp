@@ -10,27 +10,27 @@
 namespace xrpl::detail {
 
 boost::system::error_code
-toErrorCode(::http_client::RequestError code)
+toErrorCode(::rs::http_client::RequestError code)
 {
     namespace errc = boost::system::errc;
 
     switch (code)
     {
-        case ::http_client::RequestError::Ok:
+        case ::rs::http_client::RequestError::Ok:
             return {};  // default-constructed = no error
-        case ::http_client::RequestError::Timeout:
+        case ::rs::http_client::RequestError::Timeout:
             return errc::make_error_code(errc::timed_out);
-        case ::http_client::RequestError::Connect:
+        case ::rs::http_client::RequestError::Connect:
             return errc::make_error_code(errc::connection_refused);
-        case ::http_client::RequestError::Dns:
+        case ::rs::http_client::RequestError::Dns:
             return errc::make_error_code(errc::host_unreachable);
-        case ::http_client::RequestError::Tls:
+        case ::rs::http_client::RequestError::Tls:
             return errc::make_error_code(errc::protocol_error);
-        case ::http_client::RequestError::BadStatus:
+        case ::rs::http_client::RequestError::BadStatus:
             return errc::make_error_code(errc::bad_address);
-        case ::http_client::RequestError::TooLarge:
+        case ::rs::http_client::RequestError::TooLarge:
             return errc::make_error_code(errc::value_too_large);
-        case ::http_client::RequestError::Canceled:
+        case ::rs::http_client::RequestError::Canceled:
             return errc::make_error_code(errc::operation_canceled);
     }
     // Unreachable; silence compiler warnings.
@@ -38,27 +38,27 @@ toErrorCode(::http_client::RequestError code)
 }
 
 void
-startRequest(::http_client::Request req, std::unique_ptr<HttpCompletion> c)
+startRequest(::rs::http_client::Request request, std::unique_ptr<HttpCompletion> completion)
 {
     // Hand the raw pointer across the FFI boundary as an opaque token. We
     // manage its lifetime manually until either Rust calls back (success) or
     // we reclaim it below (enqueue failure).
-    auto* raw = c.release();
-    auto token = reinterpret_cast<std::size_t>(raw);
+    auto* rawCompletion = completion.release();
+    auto token = reinterpret_cast<std::size_t>(rawCompletion);
 
-    ::http_client::Status status = ::http_client::http_request(std::move(req), token);
+    ::rs::http_client::Status status = ::rs::http_client::http_request(std::move(request), token);
 
-    if (status.code != ::http_client::ErrorCode::Ok)
+    if (status.code != ::rs::http_client::ErrorCode::Ok)
     {
         // Enqueue failed — Rust will never call back.  Reclaim ownership and
         // complete the handler with an error.  All lifecycle failures
         // (NotInitialized, ShutDown, LockPoisoned, …) map to Canceled at the
         // per-request level.
-        std::unique_ptr<HttpCompletion> reclaimed(raw);
-        ::http_client::RequestResult result{
-            .code = ::http_client::RequestError::Canceled,
+        std::unique_ptr<HttpCompletion> reclaimed(rawCompletion);
+        ::rs::http_client::RequestResult result{
+            .code = ::rs::http_client::RequestError::Canceled,
             .message = ::rust::String(static_cast<std::string>(status.message)),
-            .response = ::http_client::Response{.status = 0, .headers = {}, .body = {}},
+            .response = ::rs::http_client::Response{.status = 0, .headers = {}, .body = {}},
         };
         reclaimed->complete(std::move(result));
         // `reclaimed` frees the State on scope exit.
@@ -68,13 +68,13 @@ startRequest(::http_client::Request req, std::unique_ptr<HttpCompletion> c)
 
 }  // namespace xrpl::detail
 
-// One-line shim in the http_client namespace as required by the cxx bridge.
-// Must be defined in the http_client namespace so the linker finds the symbol
+// One-line shim in the rs::http_client namespace as required by the cxx bridge.
+// Must be defined in the rs::http_client namespace so the linker finds the symbol
 // declared in HttpClientCallback.h / the generated ffi.h.
-namespace http_client {
+namespace rs::http_client {
 
 void
-resume_http_request(::std::size_t completion, ::http_client::RequestResult result)
+resume_http_request(::std::size_t completion, ::rs::http_client::RequestResult result)
 {
     // Reclaim unique_ptr from the raw pointer; `complete` posts the handler;
     // the unique_ptr destructs the State on scope exit.
@@ -83,4 +83,4 @@ resume_http_request(::std::size_t completion, ::http_client::RequestResult resul
     c->complete(std::move(result));
 }
 
-}  // namespace http_client
+}  // namespace rs::http_client
