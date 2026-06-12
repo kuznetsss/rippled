@@ -116,7 +116,7 @@ mod bridge {
         /// `UniquePtr` is dropped before the task runs and the `CompletionGuard`
         /// calls `complete` with `RequestError::Canceled` — C++ needs no
         /// separate failure handling.
-        fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) -> Status;
+        fn http_request(req: Request, completion: UniquePtr<HttpCompletion>);
     }
 
     unsafe extern "C++" {
@@ -202,7 +202,7 @@ impl Drop for CompletionGuard {
     }
 }
 
-fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) -> Status {
+fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) {
     // Build the guard BEFORE spawning so it becomes part of the task's captured
     // state.  If the task is dropped before its first poll — either because
     // `Runtime::spawn` fails to enqueue (it returns `Err` before polling) or
@@ -211,7 +211,8 @@ fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) -> Status {
     // it would never be constructed on the drop-before-poll path, and the
     // completion would be freed without ever firing.
     let guard = CompletionGuard::new(completion);
-    Runtime::spawn(async move {
+    // Error is propagated through the CompletionGuard so ignoring it here
+    let _ = Runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let response = Response {
@@ -230,6 +231,5 @@ fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) -> Status {
         };
 
         guard.complete(result);
-    })
-    .into()
+    });
 }
