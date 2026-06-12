@@ -15,13 +15,15 @@
 
 namespace xrpl::detail {
 
-/// Shared state for the multi-site failover chain.
-///
-/// Defined in xrpl::detail so it is visible inside the lambda passed to
-/// async_initiate (lambdas cannot access private members of the enclosing
-/// class template).
-///
-/// @tparam Handler  Decay-copy of the user's completion handler.
+/** Shared state for the multi-site failover chain driven by
+ *  @c HTTPClientRust::asyncRequestAny.
+ *
+ *  Heap-allocated and reference-counted so the per-site completion lambdas
+ *  can be copyable.  Defined in @c xrpl::detail (not as a private member of
+ *  @c HTTPClientRust) so the lambdas inside @c async_initiate can access it.
+ *
+ *  @tparam Handler  Decay-copy of the user's completion handler.
+ */
 template <class Handler>
 struct FailoverState
 {
@@ -43,10 +45,9 @@ struct FailoverState
     {
         if (index >= reqs.size())
         {
-            // Only reached when the request list was empty: the per-site lambda
-            // below completes on the last attempt, so a non-empty list never
-            // falls through here. Post an error so the handler still fires exactly
-            // once rather than the operation hanging forever.
+            // Only reached for an empty request list: a non-empty list always
+            // completes through the per-site lambda below.  Post an error so
+            // the handler fires exactly once rather than hanging forever.
             boost::asio::post(ex, [self = std::move(self)]() mutable {
                 self->handler(
                     boost::system::errc::make_error_code(boost::system::errc::invalid_argument),

@@ -24,11 +24,10 @@ pub enum Error {
 }
 
 impl Error {
-    /// Static, human-readable label for this error.
+    /// Static label used by both [`Display`] and the FFI [`Status`] message.
     ///
-    /// Single source of truth for both [`Display`](std::fmt::Display) and the
-    /// FFI [`Status`] message, so the two cannot drift. Returns a `&'static str`
-    /// so it can cross the FFI boundary without allocating.
+    /// Returns `&'static str` so it crosses the FFI boundary without allocating.
+    /// Single source of truth — the two representations cannot drift.
     pub(crate) const fn message(&self) -> &'static str {
         match self {
             Error::RuntimeBuild(_) => "failed to build the Tokio runtime",

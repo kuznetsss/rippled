@@ -38,10 +38,9 @@ toErrorCode(::rs::http_client::RequestError code)
 void
 startRequest(::rs::http_client::Request request, std::unique_ptr<HTTPCompletion> completion)
 {
-    // Ownership of `completion` moves into Rust.  On enqueue failure Rust
-    // drops the UniquePtr<HTTPCompletion> before the task runs, and the
-    // CompletionGuard's Drop impl calls complete() with Canceled — so there
-    // is nothing to reclaim here.
+    // Ownership of `completion` transfers to Rust.  Enqueue failure is
+    // handled on the Rust side (CompletionGuard fires Canceled); nothing
+    // to reclaim here.
     ::rs::http_client::http_request(std::move(request), std::move(completion));
 }
 

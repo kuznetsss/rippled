@@ -2,11 +2,9 @@
 
 // This header is included directly by the cxx bridge via `include!()`, which
 // places it at the TOP of the generated ffi.h — before RequestResult is
-// defined.  We therefore forward-declare RequestResult here rather than
-// re-including ffi.h.  At every call-site that actually invokes `complete`
-// (the definition of HTTPCompletionImpl::complete in HTTPCompletionImpl.h and
-// the cxx call in the Rust task), ffi.h is already fully included so
-// RequestResult is complete.
+// defined.  Forward-declaring RequestResult here (rather than re-including
+// ffi.h) breaks the cycle: at every site that actually calls complete(),
+// ffi.h is already fully included and the type is complete.
 //
 // NO guard token here — cxx must be able to include this header directly.
 
@@ -19,16 +17,17 @@ struct RequestResult;
 
 namespace xrpl::detail {
 
-/// Type-erased base for the per-request completion state.
-///
-/// cxx exposes this as an opaque C++ type to Rust.  Rust holds a
-/// `UniquePtr` to this type and calls `complete()` on it when the HTTP
-/// request finishes.  The `UniquePtr` destructor runs the virtual destructor
-/// here, cleanly freeing the concrete `HTTPCompletionImpl<Handler>`.
-///
-/// `complete` posts the handler onto its associated Asio executor but does
-/// NOT delete `this` — ownership stays with the caller's `UniquePtr` and is
-/// freed on scope exit.
+/** Type-erased base for per-request completion state, bridged to Rust as an
+ *  opaque @c HTTPCompletion.
+ *
+ *  Rust holds a @c UniquePtr<HTTPCompletion> and calls @c complete() when the
+ *  request finishes or is canceled.  The @c UniquePtr destructor invokes the
+ *  virtual @c ~HTTPCompletion, which frees the concrete
+ *  @c HTTPCompletionImpl<Handler>.
+ *
+ *  @note @c complete() must NOT delete @c this — ownership belongs to the
+ *        Rust @c UniquePtr and is released when that pointer goes out of scope.
+ */
 struct HTTPCompletion
 {
     virtual ~HTTPCompletion() = default;

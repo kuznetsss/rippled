@@ -18,40 +18,42 @@
 
 namespace xrpl::detail {
 
-/// Map a `RequestError` to a generic `boost::system::error_code` using
-/// `boost::system::errc` codes.  Does NOT invent a custom error category.
-///
-/// Defined in HTTPClientRust.cpp so the mapping is in one translation unit.
+/** Map a @c RequestError to a @c boost::system::error_code using
+ *  @c boost::system::errc values.  Does not introduce a custom error category.
+ *
+ *  Defined in HTTPClientRust.cpp so the mapping lives in one translation unit.
+ */
 boost::system::error_code
 toErrorCode(::rs::http_client::RequestError code);
 
-/// Enqueue the request on the Tokio runtime.
-///
-/// Ownership of `completion` moves into Rust.  On enqueue failure Rust drops
-/// the `UniquePtr<HTTPCompletion>` before the task runs, and the Rust
-/// `CompletionGuard`'s `Drop` impl calls `complete` with `RequestError::Canceled`
-/// — so there is nothing to reclaim on the C++ side.
-///
-/// Defined in HTTPClientRust.cpp.
+/** Forward ownership of @p completion into the Tokio runtime.
+ *
+ *  On enqueue failure Rust drops the @c UniquePtr<HTTPCompletion> before the
+ *  task runs; the Rust @c CompletionGuard's @c Drop impl then calls
+ *  @c complete() with @c RequestError::Canceled, so C++ needs no failure path.
+ *
+ *  Defined in HTTPClientRust.cpp.
+ */
 void
 startRequest(::rs::http_client::Request req, std::unique_ptr<HTTPCompletion> completion);
 
-/// Concrete completion state: stores the moved handler and holds an
-/// executor work guard to keep the io_context alive while the request is
-/// in flight.
-///
-/// @tparam Handler  Decay-copy of the user's completion handler; must be
-///                  callable as `handler(error_code, rs::http_client::Response)`.
-///
-/// The fallback executor is always `boost::asio::any_io_executor` (the public
-/// API only ever supplies that), so it is not a template parameter.  The
-/// handler's associated executor (or the fallback) is type-erased into
-/// `executor_`.
-///
-/// Per-operation cancellation is NOT supported.  The request timeout is
-/// owned by the Rust side; the only early-out on the C++ side is runtime
-/// shutdown (which triggers the `CompletionGuard` drop in Rust and calls
-/// back with `RequestError::Canceled`).
+/** Completion state for one in-flight request, handed to Rust as an opaque
+ *  @c HTTPCompletion.
+ *
+ *  Stores the decay-copied handler and an executor work guard that keeps the
+ *  @c io_context alive while the request is in flight.
+ *
+ *  The handler's associated executor is type-erased into an @c any_io_executor
+ *  rather than a second template parameter, since @c asyncRequest only ever
+ *  supplies that fallback.
+ *
+ *  @tparam Handler  User completion handler, invoked as
+ *                   @c handler(error_code, rs::http_client::Response).
+ *
+ *  @note Per-operation cancellation is unsupported.  The request ends only by
+ *        completing normally or via runtime shutdown (which triggers
+ *        @c RequestError::Canceled through the Rust @c CompletionGuard).
+ */
 template <class Handler>
 struct HTTPCompletionImpl final : HTTPCompletion
 {
@@ -66,17 +68,17 @@ struct HTTPCompletionImpl final : HTTPCompletion
     complete(::rs::http_client::RequestResult result) override
     {
         auto ec = toErrorCode(result.code);
-        // Move everything we need off `this` before posting, because the
-        // UniquePtr<HTTPCompletion> in Rust will destroy `this` on scope exit
-        // (immediately after complete() returns).
+        // Move handler and response off `this` before posting: the Rust
+        // UniquePtr destroys `this` as soon as complete() returns.
         auto h = std::move(handler_);
         auto resp = std::move(result.response);
-        // Move the work guard INTO the lambda so it keeps the io_context alive
-        // until the handler fires, then drops naturally when the lambda returns.
+        // Capture the work guard in the lambda so the io_context stays alive
+        // until the handler runs; it is released before the handler fires to
+        // avoid potential deadlocks on io_context::stop().
         boost::asio::post(
             executor_,
             [h = std::move(h), ec, resp = std::move(resp), work = std::move(work_)]() mutable {
-                work.reset();  // release before handler fires to avoid deadlocks
+                work.reset();
                 h(ec, std::move(resp));
             });
     }

@@ -203,15 +203,11 @@ impl Drop for CompletionGuard {
 }
 
 fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) {
-    // Build the guard BEFORE spawning so it becomes part of the task's captured
-    // state.  If the task is dropped before its first poll — either because
-    // `Runtime::spawn` fails to enqueue (it returns `Err` before polling) or
-    // because the runtime is shut down mid-flight — the guard is dropped and its
-    // `Drop` impl completes with `Canceled`.  If it were instead a body local
-    // it would never be constructed on the drop-before-poll path, and the
-    // completion would be freed without ever firing.
+    // Guard must be captured state (not a body local): a future dropped before
+    // first poll never runs its body, so a body-local guard would never be
+    // constructed and the completion would be freed without firing.
     let guard = CompletionGuard::new(completion);
-    // Error is propagated through the CompletionGuard so ignoring it here
+    // Enqueue failure is propagated through CompletionGuard (Canceled on drop).
     let _ = Runtime::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 

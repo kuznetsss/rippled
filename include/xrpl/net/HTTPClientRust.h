@@ -26,23 +26,31 @@ struct FailoverState;
 
 }  // namespace detail
 
-/// Asio-compatible async HTTP client backed by a Tokio runtime in Rust.
-///
-/// Exposes a single-URL `asyncRequest` that composes with any Asio
-/// completion token (lambda, `use_awaitable`, `use_future`, …), and a
-/// multi-site failover helper that chains `asyncRequest` calls until one
-/// succeeds or the list is exhausted.
+/** Asio-compatible async HTTP client backed by a Tokio runtime in Rust.
+ *
+ *  Provides a single-URL @c asyncRequest composable with any Asio completion
+ *  token (lambda, @c use_awaitable, @c use_future, …), and a multi-site
+ *  failover helper @c asyncRequestAny that tries each URL in order until one
+ *  succeeds or the list is exhausted.
+ */
 struct HTTPClientRust
 {
-    /// Issue a single HTTP request and complete with
-    /// `void(boost::system::error_code, rs::http_client::Response)`.
-    ///
-    /// The handler is always invoked on the executor associated with the
-    /// completion token (falling back to @p ex when the token has none).
-    /// The handler is never called inline from the initiating thread.
-    ///
-    /// Per-operation cancellation is not supported.  The request timeout is
-    /// set in `req.timeout_ms` and enforced by Rust.
+    /** Issue a single HTTP request.
+     *
+     *  Completion signature: @c void(boost::system::error_code,
+     *                                rs::http_client::Response).
+     *
+     *  The handler is always dispatched onto the executor associated with
+     *  @p token (falling back to @p executor when the token carries none).
+     *  The handler is never invoked inline from the calling thread.
+     *
+     *  Per-operation cancellation is not supported; the timeout is set in
+     *  @c request.timeout_ms and enforced by the Rust side.
+     *
+     *  @param executor  Fallback executor when the token has no associated one.
+     *  @param request   Request parameters including URL, method, and timeout.
+     *  @param token     Asio completion token.
+     */
     template <class CompletionToken>
     static auto
     asyncRequest(
@@ -64,13 +72,18 @@ struct HTTPClientRust
             std::move(initiation), token, std::move(executor), std::move(request));
     }
 
-    /// Attempt each URL in @p reqs in order; stop as soon as one succeeds
-    /// (no error_code).  If all fail, complete with the last error.
-    ///
-    /// This is a minimal composed operation built on `asyncRequest`.
-    ///
-    /// TODO: support per-site timeout overrides, early cancellation across
-    ///       all in-flight attempts, and structured logging of per-site errors.
+    /** Try each URL in @p requests in order; complete with the first success.
+     *
+     *  If all sites fail, completes with the last site's error.  Built on
+     *  @c asyncRequest; shares its completion signature.
+     *
+     *  @param executor  Fallback executor.
+     *  @param requests  Ordered list of request parameters to attempt.
+     *  @param token     Asio completion token.
+     *
+     *  @note TODO: per-site timeout overrides, early cancellation, and
+     *        structured per-site error logging are not yet implemented.
+     */
     template <class CompletionToken>
     static auto
     asyncRequestAny(
@@ -82,8 +95,7 @@ struct HTTPClientRust
                              boost::asio::any_io_executor executor,
                              std::vector<::rs::http_client::Request> requests) {
             using HandlerType = std::decay_t<decltype(handler)>;
-            // Heap-allocate shared state so the recursive per-site
-            // completion lambdas can be copyable.
+            // Shared ownership lets the per-site completion lambdas be copyable.
             auto state = std::make_shared<detail::FailoverState<HandlerType>>(
                 std::move(executor), std::move(requests), std::move(handler));
             state->next(state);

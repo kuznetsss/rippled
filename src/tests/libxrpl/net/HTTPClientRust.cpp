@@ -45,7 +45,7 @@ protected:
         ::rs::http_client::shutdown_tokio_runtime(2000 /*ms*/);
     }
 
-    /// Build a minimal GET request to the given URL with a 5 s timeout.
+    /** Build a minimal GET request to @p url with a 5 s timeout. */
     static ::rs::http_client::Request
     makeRequest(std::string const& url)
     {
@@ -157,7 +157,6 @@ TEST_F(HTTPClientRustTest, UseFuture)
 {
     boost::asio::io_context ioc;
 
-    // use_future returns std::future<rs::http_client::Response>.
     auto fut = HTTPClientRust::asyncRequest(
         ioc.get_executor(), makeRequest("http://example.com/future-test"), boost::asio::use_future);
 
