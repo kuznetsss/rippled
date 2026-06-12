@@ -1,4 +1,5 @@
 use crate::runtime::Runtime;
+use cxx::UniquePtr;
 use std::time::Duration;
 
 #[cxx::bridge(namespace = "rs::http_client")]
@@ -30,12 +31,14 @@ mod bridge {
     }
 
     /// HTTP method for a request.
+    #[cxx_name = "HTTPMethod"]
     enum HttpMethod {
         Get,
         Post,
     }
 
     /// A single HTTP header name/value pair.
+    #[cxx_name = "HTTPHeader"]
     struct HttpHeader {
         name: String,
         value: String,
@@ -58,7 +61,7 @@ mod bridge {
         body: Vec<u8>,
     }
 
-    /// Per-request error kinds delivered to `resume_http_request`.
+    /// Per-request error kinds delivered to `HttpCompletion::complete`.
     ///
     /// Distinct from the lifecycle [`ErrorCode`] (init/shutdown/enqueue):
     /// these codes describe what went wrong *during* an in-flight HTTP request.
@@ -82,7 +85,7 @@ mod bridge {
         Canceled,
     }
 
-    /// The outcome of an HTTP request, delivered to `resume_http_request`.
+    /// The outcome of an HTTP request, delivered to `HttpCompletion::complete`.
     ///
     /// On success `code == RequestError::Ok` and `response` is populated.
     /// On failure `code` indicates the error kind and `message` carries a
@@ -106,28 +109,38 @@ mod bridge {
 
         /// Enqueue an async HTTP request on the Tokio runtime.
         ///
-        /// When the request completes, `resume_http_request(completion, result)`
-        /// is called from a Tokio worker thread. The `completion` token is an
-        /// opaque `usize` that the C++ side uses to resume its coroutine/callback.
-        ///
-        /// Returns `ErrorCode::Ok` immediately if the task was successfully
-        /// enqueued, or an error `Status` if the runtime is unavailable.
-        fn http_request(req: Request, completion: usize) -> Status;
+        /// Ownership of `completion` moves into Rust.  When the request
+        /// finishes, Rust calls `completion->complete(result)` and then drops
+        /// the `UniquePtr`, which invokes the virtual destructor and frees the
+        /// concrete `HTTPCompletionImpl<Handler>`.  On enqueue failure the
+        /// `UniquePtr` is dropped before the task runs and the `CompletionGuard`
+        /// calls `complete` with `RequestError::Canceled` — C++ needs no
+        /// separate failure handling.
+        fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) -> Status;
     }
 
     unsafe extern "C++" {
-        include!("xrpl/net/HttpClientCallback.h");
+        include!("xrpl/net/detail/HTTPCompletion.h");
 
-        /// Called by Rust (from a Tokio worker thread) when an HTTP request
-        /// completes.  The `completion` token identifies the C++ continuation;
-        /// `result` carries the response or error details.
-        unsafe fn resume_http_request(completion: usize, result: RequestResult);
+        #[namespace = "xrpl::detail"]
+        #[cxx_name = "HTTPCompletion"]
+        type HttpCompletion;
+
+        /// Post the stored Asio handler onto its associated executor with the
+        /// given result.  Called by Rust (from a Tokio worker thread) when an
+        /// HTTP request completes or is canceled.
+        fn complete(self: Pin<&mut HttpCompletion>, result: RequestResult);
     }
 }
 
 pub(crate) use bridge::{
-    ErrorCode, HttpHeader, Request, RequestError, RequestResult, Response, Status,
+    ErrorCode, HttpCompletion, HttpHeader, Request, RequestError, RequestResult, Response, Status,
 };
+
+// SAFETY: `HttpCompletion` is accessed only via `complete()`, which posts work
+// onto a thread-safe Asio executor.  It is never aliased and is consumed
+// exactly once, so moving it across thread boundaries is safe.
+unsafe impl Send for HttpCompletion {}
 
 fn init_tokio_runtime(threads_num: usize) -> Status {
     Runtime::init(threads_num).into()
@@ -137,45 +150,43 @@ fn shutdown_tokio_runtime(timeout_ms: u64) -> Status {
     Runtime::shutdown(Duration::from_millis(timeout_ms)).into()
 }
 
-/// A drop guard that calls `resume_http_request` with `Canceled` if the
+/// A drop guard that calls `HttpCompletion::complete` with `Canceled` if the
 /// async task is dropped before it completes normally.
 ///
-/// Constructed as the *first* statement inside the spawned task body so that
-/// on enqueue failure (task never starts) the guard is never created and C++
-/// owns the failure path — preventing any double-completion.
+/// It is constructed *before* the task is spawned and moved into the task, so
+/// it lives in the future's captured state rather than as a body local.  That
+/// distinction is load-bearing: a future dropped before its first poll never
+/// runs its body, so a guard declared as a body local would never be
+/// constructed and the completion would be freed without ever firing.  As a
+/// captured variable it is instead dropped on every early-out path — enqueue
+/// failure (`Runtime::spawn` returns `Err` before the first poll) and the
+/// runtime-shutdown race alike — and its `Drop` fires `Canceled`.  On the happy
+/// path the task body consumes it via `complete`.
 ///
-/// Residual narrow race: a task that is enqueued but dropped before its first
-/// poll will trigger the `Drop` path. This is an accepted limitation for now;
-/// per-operation cancellation is deferred to a future iteration.
+/// Per-operation cancellation is not otherwise supported; that is deferred to a
+/// future iteration.
 struct CompletionGuard {
-    completion: usize,
-    disarmed: bool,
+    completion: Option<UniquePtr<HttpCompletion>>,
 }
 
 impl CompletionGuard {
-    fn new(completion: usize) -> Self {
+    fn new(completion: UniquePtr<HttpCompletion>) -> Self {
         Self {
-            completion,
-            disarmed: false,
+            completion: Some(completion),
         }
     }
 
     /// Disarm and complete with the given result (happy path).
-    ///
-    /// # Safety
-    /// `completion` must be a valid pointer cast to `usize` that the C++ side
-    /// passed to `http_request`. C++ guarantees the pointed-to object outlives
-    /// this call.
-    unsafe fn complete(mut self, result: RequestResult) {
-        self.disarmed = true;
-        // SAFETY: forwarded from caller's safety contract.
-        unsafe { bridge::resume_http_request(self.completion, result) };
+    fn complete(mut self, result: RequestResult) {
+        if let Some(mut c) = self.completion.take() {
+            c.pin_mut().complete(result);
+        }
     }
 }
 
 impl Drop for CompletionGuard {
     fn drop(&mut self) {
-        if !self.disarmed {
+        if let Some(mut c) = self.completion.take() {
             // Task was dropped before completing — signal Canceled to C++.
             let result = RequestResult {
                 code: RequestError::Canceled,
@@ -186,23 +197,21 @@ impl Drop for CompletionGuard {
                     body: vec![],
                 },
             };
-            // SAFETY: same contract as in `complete` — the C++ pointer is
-            // still valid because the task was either mid-flight (runtime
-            // still alive) or the runtime is shutting down and C++ holds the
-            // State until we call back.
-            unsafe { bridge::resume_http_request(self.completion, result) };
+            c.pin_mut().complete(result);
         }
     }
 }
 
-fn http_request(req: Request, completion: usize) -> Status {
+fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) -> Status {
+    // Build the guard BEFORE spawning so it becomes part of the task's captured
+    // state.  If the task is dropped before its first poll — either because
+    // `Runtime::spawn` fails to enqueue (it returns `Err` before polling) or
+    // because the runtime is shut down mid-flight — the guard is dropped and its
+    // `Drop` impl completes with `Canceled`.  If it were instead a body local
+    // it would never be constructed on the drop-before-poll path, and the
+    // completion would be freed without ever firing.
+    let guard = CompletionGuard::new(completion);
     Runtime::spawn(async move {
-        // The guard MUST be the first thing created inside the task so that
-        // if this task is dropped (e.g. runtime shutdown_timeout) C++ is
-        // notified via Canceled.  On enqueue failure the task body never
-        // runs, so the guard is never constructed and C++ handles that path.
-        let guard = CompletionGuard::new(completion);
-
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let response = Response {
@@ -220,9 +229,7 @@ fn http_request(req: Request, completion: usize) -> Status {
             response,
         };
 
-        // SAFETY: `completion` is a valid C++ completion-State pointer cast
-        // to `usize`; the C++ side guarantees the object outlives this call.
-        unsafe { guard.complete(result) };
+        guard.complete(result);
     })
     .into()
 }

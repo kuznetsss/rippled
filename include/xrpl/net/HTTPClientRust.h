@@ -4,7 +4,7 @@
 // not standalone headers.  This token grants them access; they #error without
 // it so they cannot be included directly.  Undefined at the bottom of the file.
 #define XRPL_NET_HTTPCLIENTRUST_INTERNAL
-#include <xrpl/net/detail/HttpCompletion.h>
+#include <xrpl/net/detail/HTTPCompletionImpl.h>
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -54,7 +54,7 @@ struct HTTPClientRust
                              boost::asio::any_io_executor executor,
                              ::rs::http_client::Request request) {
             using HandlerType = std::decay_t<decltype(handler)>;
-            auto completion = std::make_unique<detail::HttpCompletionImpl<HandlerType>>(
+            auto completion = std::make_unique<detail::HTTPCompletionImpl<HandlerType>>(
                 std::move(handler), std::move(executor));
             detail::startRequest(std::move(request), std::move(completion));
         };

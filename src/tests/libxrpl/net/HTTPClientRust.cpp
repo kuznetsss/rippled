@@ -50,7 +50,7 @@ protected:
     makeRequest(std::string const& url)
     {
         ::rs::http_client::Request req;
-        req.method = ::rs::http_client::HttpMethod::Get;
+        req.method = ::rs::http_client::HTTPMethod::Get;
         // rust::String is assigned from std::string by copy, so no std::move.
         req.url = url;
         req.timeout_ms = 5000;
