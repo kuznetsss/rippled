@@ -1,5 +1,4 @@
 use crate::runtime::Runtime;
-use cxx::UniquePtr;
 use std::time::Duration;
 
 #[cxx::bridge(namespace = "rs::http_client")]
@@ -142,90 +141,12 @@ pub(crate) use bridge::{
 // exactly once, so moving it across thread boundaries is safe.
 unsafe impl Send for HttpCompletion {}
 
+use crate::request::http_request;
+
 fn init_tokio_runtime(threads_num: usize) -> Status {
     Runtime::init(threads_num).into()
 }
 
 fn shutdown_tokio_runtime(timeout_ms: u64) -> Status {
     Runtime::shutdown(Duration::from_millis(timeout_ms)).into()
-}
-
-/// A drop guard that calls `HttpCompletion::complete` with `Canceled` if the
-/// async task is dropped before it completes normally.
-///
-/// It is constructed *before* the task is spawned and moved into the task, so
-/// it lives in the future's captured state rather than as a body local.  That
-/// distinction is load-bearing: a future dropped before its first poll never
-/// runs its body, so a guard declared as a body local would never be
-/// constructed and the completion would be freed without ever firing.  As a
-/// captured variable it is instead dropped on every early-out path — enqueue
-/// failure (`Runtime::spawn` returns `Err` before the first poll) and the
-/// runtime-shutdown race alike — and its `Drop` fires `Canceled`.  On the happy
-/// path the task body consumes it via `complete`.
-///
-/// Per-operation cancellation is not otherwise supported; that is deferred to a
-/// future iteration.
-struct CompletionGuard {
-    completion: Option<UniquePtr<HttpCompletion>>,
-}
-
-impl CompletionGuard {
-    fn new(completion: UniquePtr<HttpCompletion>) -> Self {
-        Self {
-            completion: Some(completion),
-        }
-    }
-
-    /// Disarm and complete with the given result (happy path).
-    fn complete(mut self, result: RequestResult) {
-        if let Some(mut c) = self.completion.take() {
-            c.pin_mut().complete(result);
-        }
-    }
-}
-
-impl Drop for CompletionGuard {
-    fn drop(&mut self) {
-        if let Some(mut c) = self.completion.take() {
-            // Task was dropped before completing — signal Canceled to C++.
-            let result = RequestResult {
-                code: RequestError::Canceled,
-                message: String::from("request task was dropped"),
-                response: Response {
-                    status: 0,
-                    headers: vec![],
-                    body: vec![],
-                },
-            };
-            c.pin_mut().complete(result);
-        }
-    }
-}
-
-fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) {
-    // Guard must be captured state (not a body local): a future dropped before
-    // first poll never runs its body, so a body-local guard would never be
-    // constructed and the completion would be freed without firing.
-    let guard = CompletionGuard::new(completion);
-    // Enqueue failure is propagated through CompletionGuard (Canceled on drop).
-    let _ = Runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let response = Response {
-            status: 200,
-            headers: vec![HttpHeader {
-                name: "x-stub".into(),
-                value: "true".into(),
-            }],
-            body: format!("stub response for {}", req.url).into_bytes(),
-        };
-
-        let result = RequestResult {
-            code: RequestError::Ok,
-            message: String::new(),
-            response,
-        };
-
-        guard.complete(result);
-    });
 }

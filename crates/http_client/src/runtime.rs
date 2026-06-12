@@ -45,7 +45,11 @@ impl Runtime {
     /// has already been taken).
     pub(crate) fn shutdown(timeout: Duration) -> Result<()> {
         let runtime = RUNTIME.get().ok_or(Error::NotInitialized)?;
-        let inner = runtime.inner.write().map_err(|_| Error::LockPoisoned)?.take();
+        let inner = runtime
+            .inner
+            .write()
+            .map_err(|_| Error::LockPoisoned)?
+            .take();
         if let Some(inner) = inner {
             inner.shutdown_timeout(timeout);
         }
