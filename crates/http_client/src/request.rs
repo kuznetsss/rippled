@@ -12,22 +12,16 @@ use cxx::UniquePtr;
 /// The cancellation-on-drop guarantee is implemented by [`CompletionGuard`];
 /// see that type's doc comment for the load-bearing detail about captured vs.
 /// body-local state.
-pub(crate) fn http_request(req: Request, completion: UniquePtr<HttpCompletion>) {
+pub(crate) fn http_request(request: Request, completion: UniquePtr<HttpCompletion>) {
     // Guard must be captured state — see CompletionGuard's doc comment.
     let guard = CompletionGuard::new(completion);
     // Enqueue failure is propagated through CompletionGuard (Canceled on drop).
     let _ = Runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let response = Response {
-            status: 200,
-            headers: vec![HttpHeader {
-                name: "x-stub".into(),
-                value: "true".into(),
-            }],
-            body: format!("stub response for {}", req.url).into_bytes(),
-        };
-
-        guard.complete(RequestResult::ok(response));
+        let result = do_http_request(request).await;
+        guard.complete(result);
     });
+}
+
+async fn do_http_request(request: Request) -> RequestResult {
+    todo!()
 }

@@ -33,7 +33,8 @@ function(add_xrpl_crate name)
     # cxx `include!()` (e.g. extern "C++" callback declarations). Let the
     # codegen target see the public include root so those resolve.
     target_include_directories(
-        ${name}_cxxbridge PRIVATE ${CMAKE_SOURCE_DIR}/include
+        ${name}_cxxbridge
+        PRIVATE ${CMAKE_SOURCE_DIR}/include
     )
     # Generated cxxbridge headers don't exist at configure time; CMake 3.28+
     # validates INTERFACE_SOURCES on consuming targets. Clear it to skip the
@@ -41,6 +42,24 @@ function(add_xrpl_crate name)
     set_target_properties(${name}_cxxbridge PROPERTIES INTERFACE_SOURCES "")
     add_dependencies(xrpl_crates ${name}_cxxbridge)
     target_link_libraries(xrpl_crates_cxxbridge INTERFACE ${name}_cxxbridge)
+
+    # The http_client crate links reqwest + rustls, whose macOS certificate path
+    # (rustls-platform-verifier -> security-framework) requires Apple's Security and
+    # CoreFoundation frameworks plus libiconv. hyper-util's system proxy matcher
+    # requires SystemConfiguration. Corrosion does not propagate a staticlib's
+    # `native-static-libs` to external CMake consumers, so without this the final
+    # link of any C++ target using the crates fails with undefined symbols. The list
+    # was confirmed via `cargo rustc -- --print native-static-libs`.
+    if(APPLE)
+        target_link_libraries(
+            xrpl_crates_cxxbridge
+            INTERFACE
+                "-framework Security"
+                "-framework CoreFoundation"
+                "-framework SystemConfiguration"
+                "-liconv"
+        )
+    endif()
 endfunction()
 
 add_xrpl_crate(rs_http_client CRATE http_client FILES ffi.rs)

@@ -13,6 +13,7 @@
 //! - `result` — inherent constructors for bridge result types
 //! - `runtime` — global Tokio runtime wrapper
 //! - `error` — `Error` and `Result` types
+mod client;
 mod completion;
 mod error;
 mod ffi;

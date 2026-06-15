@@ -1,3 +1,4 @@
+use crate::client::{init_tls_context, reset_tls_context};
 use crate::runtime::Runtime;
 use std::time::Duration;
 
@@ -16,6 +17,8 @@ mod bridge {
         NotInitialized,
         ShutDown,
         LockPoisoned,
+        CertificateReading,
+        TlsConfig,
     }
 
     /// Outcome of a fallible, value-less operation.
@@ -26,7 +29,7 @@ mod bridge {
     /// inspecting it directly.
     struct Status {
         code: ErrorCode,
-        message: &'static str,
+        message: String,
     }
 
     /// HTTP method for a request.
@@ -58,6 +61,12 @@ mod bridge {
         status: u16,
         headers: Vec<HttpHeader>,
         body: Vec<u8>,
+    }
+
+    struct TlsConfig {
+        verify: bool,
+        verify_file: String,
+        verify_dir: String,
     }
 
     /// Per-request error kinds delivered to `HttpCompletion::complete`.
@@ -116,6 +125,9 @@ mod bridge {
         /// calls `complete` with `RequestError::Canceled` — C++ needs no
         /// separate failure handling.
         fn http_request(req: Request, completion: UniquePtr<HttpCompletion>);
+
+        fn init_tls_context(config: &TlsConfig) -> Status;
+        fn reset_tls_context() -> Status;
     }
 
     unsafe extern "C++" {
@@ -134,6 +146,7 @@ mod bridge {
 
 pub(crate) use bridge::{
     ErrorCode, HttpCompletion, HttpHeader, Request, RequestError, RequestResult, Response, Status,
+    TlsConfig,
 };
 
 // SAFETY: `HttpCompletion` is accessed only via `complete()`, which posts work
