@@ -35,4 +35,17 @@ impl RequestResult {
             response: Response::empty(),
         }
     }
+
+    /// Construct a failure result with an explicit `code` and `message`.
+    ///
+    /// The `response` field is set to [`Response::empty`].  Use this for any
+    /// in-flight error other than cancellation (e.g. `NotInitialized`,
+    /// `Timeout`, `Connect`, `TooLarge`).
+    pub(crate) fn error(code: RequestError, message: &str) -> Self {
+        RequestResult {
+            code,
+            message: message.to_owned(),
+            response: Response::empty(),
+        }
+    }
 }

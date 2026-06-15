@@ -9,6 +9,7 @@ mod bridge {
     /// Kept in sync with `Error` by the exhaustive `From<&Error>` impl in the
     /// `error` module: adding an `Error` variant without a matching
     /// `ErrorCode` variant fails to compile.
+    #[derive(Debug)]
     enum ErrorCode {
         /// The operation succeeded; `Status::message` is empty.
         Ok,
@@ -17,7 +18,10 @@ mod bridge {
         NotInitialized,
         ShutDown,
         LockPoisoned,
+        /// A TLS certificate file or directory could not be read from disk.
         CertificateReading,
+        /// The TLS client context could not be built (bad config or cert parse
+        /// error).
         TlsConfig,
     }
 
@@ -52,6 +56,7 @@ mod bridge {
         url: String,
         headers: Vec<HttpHeader>,
         body: Vec<u8>,
+        has_timeout: bool,
         timeout_ms: u64,
         max_response_bytes: usize,
     }
@@ -63,17 +68,12 @@ mod bridge {
         body: Vec<u8>,
     }
 
-    struct TlsConfig {
-        verify: bool,
-        verify_file: String,
-        verify_dir: String,
-    }
-
     /// Per-request error kinds delivered to `HttpCompletion::complete`.
     ///
     /// Distinct from the lifecycle [`ErrorCode`] (init/shutdown/enqueue):
     /// these codes describe what went wrong *during* an in-flight HTTP request.
     /// Mapped to `boost::system::errc` values on the C++ side.
+    #[derive(Debug)]
     enum RequestError {
         /// Request completed successfully.
         Ok,
@@ -91,6 +91,30 @@ mod bridge {
         TooLarge,
         /// Request was cancelled (e.g. runtime shutdown dropped the task).
         Canceled,
+        /// A request was issued before [`init_tls_context`] was called.
+        ///
+        /// The global `reqwest::Client` has not been initialised; the caller
+        /// must call `init_tls_context` before issuing requests.
+        NotInitialized,
+    }
+
+    /// TLS / certificate-verification parameters for [`init_tls_context`].
+    ///
+    /// Mirrors the fields of `HTTPClientSSLContext` on the C++ side so that
+    /// the same configuration can be forwarded across the FFI boundary without
+    /// an additional mapping layer.
+    struct TlsConfig {
+        /// When `false`, TLS certificate verification is completely disabled
+        /// (`danger_accept_invalid_certs`).  When `true`, certificates are
+        /// verified according to `verify_file` / `verify_dir` / system roots.
+        verify: bool,
+        /// Path to a PEM bundle that **replaces** the default CA roots.
+        /// Empty string means "use the platform / webpki roots instead".
+        verify_file: String,
+        /// Path to a directory of PEM certificates to add on top of whatever
+        /// roots are in effect.  Each file in the directory is attempted; files
+        /// that are not valid PEM are skipped silently.
+        verify_dir: String,
     }
 
     /// The outcome of an HTTP request, delivered to `HttpCompletion::complete`.
@@ -115,6 +139,24 @@ mod bridge {
         /// `ErrorCode::NotInitialized` if the runtime was never initialized.
         fn shutdown_tokio_runtime(timeout_ms: u64) -> Status;
 
+        /// Build and store the global `reqwest::Client` from `config`.
+        ///
+        /// This must be called **before** any [`http_request`] call.  Calling
+        /// it again while a client is already stored atomically replaces it
+        /// (safe to call at reconfiguration time).
+        ///
+        /// Returns `ErrorCode::CertRead` if a certificate file/directory could
+        /// not be read, `ErrorCode::TlsConfig` if the client could not be
+        /// built.
+        fn init_tls_context(config: TlsConfig) -> Status;
+
+        /// Drop the stored `reqwest::Client`.
+        ///
+        /// After this call, [`http_request`] will return
+        /// `RequestError::NotInitialized` until [`init_tls_context`] is called
+        /// again.  A no-op (returns `Ok`) if no client is currently stored.
+        fn reset_tls_context() -> Status;
+
         /// Enqueue an async HTTP request on the Tokio runtime.
         ///
         /// Ownership of `completion` moves into Rust.  When the request
@@ -125,9 +167,6 @@ mod bridge {
         /// calls `complete` with `RequestError::Canceled` — C++ needs no
         /// separate failure handling.
         fn http_request(req: Request, completion: UniquePtr<HttpCompletion>);
-
-        fn init_tls_context(config: &TlsConfig) -> Status;
-        fn reset_tls_context() -> Status;
     }
 
     unsafe extern "C++" {
@@ -145,8 +184,8 @@ mod bridge {
 }
 
 pub(crate) use bridge::{
-    ErrorCode, HttpCompletion, HttpHeader, Request, RequestError, RequestResult, Response, Status,
-    TlsConfig,
+    ErrorCode, HttpCompletion, HttpHeader, HttpMethod, Request, RequestError, RequestResult,
+    Response, Status, TlsConfig,
 };
 
 // SAFETY: `HttpCompletion` is accessed only via `complete()`, which posts work

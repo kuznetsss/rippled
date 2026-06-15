@@ -78,6 +78,8 @@ toErrorCode(::rs::http_client::RequestError code)
             return errc::make_error_code(errc::value_too_large);
         case ::rs::http_client::RequestError::Canceled:
             return errc::make_error_code(errc::operation_canceled);
+        case ::rs::http_client::RequestError::NotInitialized:
+            return errc::make_error_code(errc::operation_not_permitted);
     }
     return errc::make_error_code(errc::operation_canceled);
 }

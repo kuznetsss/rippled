@@ -51,7 +51,7 @@ fn slot() -> &'static RwLock<Option<reqwest::Client>> {
 /// Returns `Err(Error::CertificateReading(_))` if a certificate file/directory cannot
 /// be read from disk, and `Err(Error::TlsConfig(_))` if the `reqwest` builder
 /// rejects the configuration.
-pub(crate) fn init_tls_context(config: &TlsConfig) -> Status {
+pub(crate) fn init_tls_context(config: TlsConfig) -> Status {
     build_and_store(config).into()
 }
 
@@ -80,7 +80,7 @@ pub(crate) fn get() -> Result<reqwest::Client> {
 // Internal builder
 // ---------------------------------------------------------------------------
 
-fn build_and_store(config: &TlsConfig) -> Result<()> {
+fn build_and_store(config: TlsConfig) -> Result<()> {
     let client = build_client(&config)?;
     *slot().write().map_err(|_| Error::LockPoisoned)? = Some(client);
     Ok(())
@@ -114,7 +114,6 @@ fn build_and_store(config: &TlsConfig) -> Result<()> {
 /// [`tls_certs_only`]: reqwest::ClientBuilder::tls_certs_only
 /// [`tls_certs_merge`]: reqwest::ClientBuilder::tls_certs_merge
 fn build_client(config: &TlsConfig) -> Result<reqwest::Client> {
-    const TCP_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
     let mut builder = reqwest::Client::builder()
         // The old C++ client used HTTP/1.0 Connection: close and never
         // followed redirects.  Preserve that behaviour.
