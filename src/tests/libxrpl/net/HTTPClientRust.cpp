@@ -1,6 +1,5 @@
 #include <xrpl/net/HTTPClientRust.h>
 
-// Generated cxx bridge — rs::http_client::init_tokio_runtime, etc.
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 
@@ -8,10 +7,8 @@
 #include <rs_http_client_cxxbridge/ffi.h>
 
 #include <chrono>
-#include <future>
 #include <string>
 #include <thread>
-#include <vector>
 
 using namespace xrpl;
 
@@ -43,19 +40,6 @@ protected:
     {
         // Best-effort shutdown; ignore errors (e.g. already-shut-down).
         ::rs::http_client::shutdown_tokio_runtime(2000 /*ms*/);
-    }
-
-    /** Build a minimal GET request to @p url with a 5 s timeout. */
-    static ::rs::http_client::Request
-    makeRequest(std::string const& url)
-    {
-        ::rs::http_client::Request req;
-        req.method = ::rs::http_client::HTTPMethod::Get;
-        // rust::String is assigned from std::string by copy, so no std::move.
-        req.url = url;
-        req.timeout_ms = 5000;
-        req.max_response_bytes = 1024 * 1024;
-        return req;
     }
 };
 
@@ -89,25 +73,25 @@ TEST_F(HTTPClientRustTest, BasicRequest)
     boost::system::error_code resultEc;
     ::rs::http_client::Response resultResp;
 
-    HTTPClientRust::asyncRequest(
-        ioc.get_executor(),
-        makeRequest("http://example.com/test"),
-        [&](boost::system::error_code ec, ::rs::http_client::Response resp) {
-            resultEc = ec;
-            resultResp = std::move(resp);
-            done = true;
-        });
+    HTTPRequestBuilder("http://example.com/test", ::rs::http_client::HTTPMethod::Get)
+        .setTimeout(std::chrono::seconds(5))
+        .setMaxResponseSize(1024 * 1024)
+        .asyncSubmit(
+            ioc.get_executor(),
+            [&](boost::system::error_code ec, ::rs::http_client::Response resp) {
+                resultEc = ec;
+                resultResp = std::move(resp);
+                done = true;
+            });
 
     ASSERT_TRUE(runUntilDone(ioc, done)) << "handler did not fire in time";
 
     EXPECT_FALSE(resultEc) << resultEc.message();
     EXPECT_EQ(resultResp.status, 200);
 
-    // Body should contain "stub response for"
     std::string body(reinterpret_cast<char const*>(resultResp.body.data()), resultResp.body.size());
     EXPECT_NE(body.find("stub response for"), std::string::npos) << "body: " << body;
 
-    // x-stub header should be present
     bool stubHeaderFound = false;
     for (auto const& h : resultResp.headers)
     {
@@ -130,15 +114,16 @@ TEST_F(HTTPClientRustTest, HandlerOnIocThread)
     std::thread::id handlerThreadId;
     std::thread::id iocThreadId;
 
-    HTTPClientRust::asyncRequest(
-        ioc.get_executor(),
-        makeRequest("http://example.com/thread-test"),
-        [&](boost::system::error_code /*ec*/, ::rs::http_client::Response /*r*/) {
-            handlerThreadId = std::this_thread::get_id();
-            done = true;
-        });
+    HTTPRequestBuilder("http://example.com/thread-test", ::rs::http_client::HTTPMethod::Get)
+        .setTimeout(std::chrono::seconds(5))
+        .setMaxResponseSize(1024 * 1024)
+        .asyncSubmit(
+            ioc.get_executor(),
+            [&](boost::system::error_code /*ec*/, ::rs::http_client::Response /*r*/) {
+                handlerThreadId = std::this_thread::get_id();
+                done = true;
+            });
 
-    // Run the io_context on *this* thread and capture its thread id.
     iocThreadId = std::this_thread::get_id();
     ASSERT_TRUE(runUntilDone(ioc, done)) << "handler did not fire in time";
 
@@ -157,11 +142,12 @@ TEST_F(HTTPClientRustTest, UseFuture)
 {
     boost::asio::io_context ioc;
 
-    auto fut = HTTPClientRust::asyncRequest(
-        ioc.get_executor(), makeRequest("http://example.com/future-test"), boost::asio::use_future);
+    auto fut =
+        HTTPRequestBuilder("http://example.com/future-test", ::rs::http_client::HTTPMethod::Get)
+            .setTimeout(std::chrono::seconds(5))
+            .setMaxResponseSize(1024 * 1024)
+            .asyncSubmit(ioc.get_executor(), boost::asio::use_future);
 
-    // Run the io_context in a background thread so ioc.run() drives the op
-    // while we wait on the future in the main thread.
     std::thread runner([&] { ioc.run(); });
 
     ::rs::http_client::Response result;
@@ -170,39 +156,4 @@ TEST_F(HTTPClientRustTest, UseFuture)
     runner.join();
 
     EXPECT_EQ(result.status, 200);
-}
-
-// ---------------------------------------------------------------------------
-// Failover test: asyncRequestAny with multiple "sites".
-//
-// The stub succeeds for every URL, so the call completes on the first entry.
-// ---------------------------------------------------------------------------
-TEST_F(HTTPClientRustTest, FailoverAllSucceed)
-{
-    boost::asio::io_context ioc;
-    bool done = false;
-    boost::system::error_code resultEc;
-    ::rs::http_client::Response resultResp;
-
-    std::vector<::rs::http_client::Request> reqs;
-    reqs.push_back(makeRequest("http://site1.example.com/"));
-    reqs.push_back(makeRequest("http://site2.example.com/"));
-    reqs.push_back(makeRequest("http://site3.example.com/"));
-
-    HTTPClientRust::asyncRequestAny(
-        ioc.get_executor(),
-        std::move(reqs),
-        [&](boost::system::error_code ec, ::rs::http_client::Response resp) {
-            resultEc = ec;
-            resultResp = std::move(resp);
-            done = true;
-        });
-
-    ASSERT_TRUE(runUntilDone(ioc, done)) << "handler did not fire in time";
-
-    EXPECT_FALSE(resultEc) << resultEc.message();
-    EXPECT_EQ(resultResp.status, 200);
-
-    std::string body(reinterpret_cast<char const*>(resultResp.body.data()), resultResp.body.size());
-    EXPECT_NE(body.find("stub response for"), std::string::npos) << "body: " << body;
 }

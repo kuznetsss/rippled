@@ -26,17 +26,6 @@ namespace xrpl::detail {
 boost::system::error_code
 toErrorCode(::rs::http_client::RequestError code);
 
-/** Forward ownership of @p completion into the Tokio runtime.
- *
- *  On enqueue failure Rust drops the @c UniquePtr<HTTPCompletion> before the
- *  task runs; the Rust @c CompletionGuard's @c Drop impl then calls
- *  @c complete() with @c RequestError::Canceled, so C++ needs no failure path.
- *
- *  Defined in HTTPClientRust.cpp.
- */
-void
-startRequest(::rs::http_client::Request req, std::unique_ptr<HTTPCompletion> completion);
-
 /** Completion state for one in-flight request, handed to Rust as an opaque
  *  @c HTTPCompletion.
  *
@@ -55,8 +44,14 @@ startRequest(::rs::http_client::Request req, std::unique_ptr<HTTPCompletion> com
  *        @c RequestError::Canceled through the Rust @c CompletionGuard).
  */
 template <class Handler>
-struct HTTPCompletionImpl final : HTTPCompletion
+class HTTPCompletionImpl final : public HTTPCompletion
 {
+private:
+    Handler handler_;
+    boost::asio::any_io_executor executor_;
+    boost::asio::executor_work_guard<boost::asio::any_io_executor> work_;
+
+public:
     HTTPCompletionImpl(Handler h, boost::asio::any_io_executor fallback)
         : handler_(std::move(h))
         , executor_(boost::asio::get_associated_executor(handler_, fallback))
@@ -82,11 +77,6 @@ struct HTTPCompletionImpl final : HTTPCompletion
                 h(ec, std::move(resp));
             });
     }
-
-private:
-    Handler handler_;
-    boost::asio::any_io_executor executor_;
-    boost::asio::executor_work_guard<boost::asio::any_io_executor> work_;
 };
 
 }  // namespace xrpl::detail

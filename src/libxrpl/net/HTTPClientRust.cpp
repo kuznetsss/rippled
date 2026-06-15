@@ -3,9 +3,57 @@
 #include <boost/system/errc.hpp>
 #include <boost/system/error_code.hpp>
 
-#include <memory>
+#include <chrono>
+#include <cstdint>
+#include <span>
+#include <string_view>
+#include <utility>
 
-namespace xrpl::detail {
+namespace xrpl {
+
+HTTPRequestBuilder::HTTPRequestBuilder(std::string_view url, ::rs::http_client::HTTPMethod method)
+{
+    request_.method = method;
+    request_.url = rust::String(url.data(), url.size());
+}
+
+HTTPRequestBuilder&
+HTTPRequestBuilder::addHeader(std::string_view name, std::string_view value)
+{
+    request_.headers.push_back(
+        ::rs::http_client::HTTPHeader{
+            .name = rust::String(name.data(), name.size()),
+            .value = rust::String(value.data(), value.size())});
+    return *this;
+}
+
+HTTPRequestBuilder&
+HTTPRequestBuilder::setBody(std::span<uint8_t const> body)
+{
+    rust::Vec<uint8_t> vec;
+    vec.reserve(body.size());
+    for (uint8_t b : body)
+        vec.push_back(b);
+    request_.body = std::move(vec);
+    return *this;
+}
+
+HTTPRequestBuilder&
+HTTPRequestBuilder::setTimeout(std::chrono::steady_clock::duration timeout)
+{
+    request_.timeout_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
+    return *this;
+}
+
+HTTPRequestBuilder&
+HTTPRequestBuilder::setMaxResponseSize(size_t size)
+{
+    request_.max_response_bytes = size;
+    return *this;
+}
+
+namespace detail {
 
 boost::system::error_code
 toErrorCode(::rs::http_client::RequestError code)
@@ -15,7 +63,7 @@ toErrorCode(::rs::http_client::RequestError code)
     switch (code)
     {
         case ::rs::http_client::RequestError::Ok:
-            return {};  // default-constructed = no error
+            return {};
         case ::rs::http_client::RequestError::Timeout:
             return errc::make_error_code(errc::timed_out);
         case ::rs::http_client::RequestError::Connect:
@@ -31,17 +79,9 @@ toErrorCode(::rs::http_client::RequestError code)
         case ::rs::http_client::RequestError::Canceled:
             return errc::make_error_code(errc::operation_canceled);
     }
-    // Unreachable; silence compiler warnings.
     return errc::make_error_code(errc::operation_canceled);
 }
 
-void
-startRequest(::rs::http_client::Request request, std::unique_ptr<HTTPCompletion> completion)
-{
-    // Ownership of `completion` transfers to Rust.  Enqueue failure is
-    // handled on the Rust side (CompletionGuard fires Canceled); nothing
-    // to reclaim here.
-    ::rs::http_client::http_request(std::move(request), std::move(completion));
-}
+}  // namespace detail
 
-}  // namespace xrpl::detail
+}  // namespace xrpl
