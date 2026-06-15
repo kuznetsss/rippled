@@ -29,12 +29,13 @@ use cxx::UniquePtr;
 /// The cancellation-on-drop guarantee is implemented by [`CompletionGuard`];
 /// see that type's doc comment for the load-bearing detail about captured vs.
 /// body-local state.
-pub(crate) fn http_request(request: Request, completion: UniquePtr<HttpCompletion>) {
+pub(crate) fn http_request(request: Request, body: &[u8], completion: UniquePtr<HttpCompletion>) {
     // Guard must be captured state — see CompletionGuard's doc comment.
     let guard = CompletionGuard::new(completion);
+    let body = body.to_vec();
     // Enqueue failure is propagated through CompletionGuard (Canceled on drop).
     let _ = Runtime::spawn(async move {
-        let result = execute(request).await;
+        let result = execute(request, body).await;
         guard.complete(result);
     });
 }
@@ -60,7 +61,7 @@ pub(crate) fn http_request(request: Request, completion: UniquePtr<HttpCompletio
 /// | Body exceeds `max_response_bytes` | `TooLarge` |
 /// | URL parse error | `Connect` (closest semantic match) |
 /// | Non-2xx status | `Ok` (status is surfaced in `Response`) |
-pub(crate) async fn execute(request: Request) -> RequestResult {
+pub(crate) async fn execute(request: Request, body: Vec<u8>) -> RequestResult {
     // ── 1. Obtain the shared client ─────────────────────────────────────────
     let client = match client::get() {
         Ok(c) => c,
@@ -80,13 +81,12 @@ pub(crate) async fn execute(request: Request) -> RequestResult {
     };
 
     let mut request_builder = client.request(method, &*request.url);
-    if request.has_timeout {
-        request_builder = request_builder.timeout(Duration::from_millis(request.timeout_ms));
-    }
+    request_builder = request_builder.timeout(Duration::from_millis(request.timeout_ms));
 
     for h in &request.headers {
         let name = match reqwest::header::HeaderName::from_bytes(h.name.as_bytes()) {
             Ok(n) => n,
+            // TODO: return an error
             Err(_) => continue, // skip malformed header names
         };
         let value = match reqwest::header::HeaderValue::from_bytes(h.value.as_bytes()) {
@@ -96,8 +96,8 @@ pub(crate) async fn execute(request: Request) -> RequestResult {
         request_builder = request_builder.header(name, value);
     }
 
-    if !request.body.is_empty() {
-        request_builder = request_builder.body(request.body);
+    if !body.is_empty() {
+        request_builder = request_builder.body(body);
     }
 
     // ── 3. Send ─────────────────────────────────────────────────────────────
@@ -122,7 +122,15 @@ pub(crate) async fn execute(request: Request) -> RequestResult {
 
     // ── 5. Stream body with cap ─────────────────────────────────────────────
     let max = request.max_response_bytes;
-    let mut body: Vec<u8> = Vec::new();
+    // Right-size the buffer from Content-Length when present, clamped to the
+    // cap so a small response does not eagerly allocate the full ceiling and a
+    // lying/huge Content-Length cannot over-allocate.  Unknown length (chunked)
+    // falls back to growing on demand.
+    let initial = resp
+        .content_length()
+        .map(|n| (n as usize).min(max))
+        .unwrap_or(0);
+    let mut body: Vec<u8> = Vec::with_capacity(initial);
     let mut stream = resp;
 
     loop {

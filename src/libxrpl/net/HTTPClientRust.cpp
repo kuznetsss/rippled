@@ -5,16 +5,21 @@
 
 #include <chrono>
 #include <cstdint>
-#include <span>
 #include <string_view>
 #include <utility>
 
 namespace xrpl {
 
-HTTPRequestBuilder::HTTPRequestBuilder(std::string_view url, ::rs::http_client::HTTPMethod method)
+HTTPRequestBuilder::HTTPRequestBuilder(
+    std::string_view url,
+    ::rs::http_client::HTTPMethod method,
+    std::chrono::steady_clock::duration timeout)
 {
     request_.method = method;
     request_.url = rust::String(url.data(), url.size());
+    request_.timeout_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
+    request_.max_response_bytes = kDefaultMaxResponseSize;
 }
 
 HTTPRequestBuilder&
@@ -28,21 +33,9 @@ HTTPRequestBuilder::addHeader(std::string_view name, std::string_view value)
 }
 
 HTTPRequestBuilder&
-HTTPRequestBuilder::setBody(std::span<uint8_t const> body)
+HTTPRequestBuilder::setBody(std::vector<uint8_t> body)
 {
-    rust::Vec<uint8_t> vec;
-    vec.reserve(body.size());
-    for (uint8_t b : body)
-        vec.push_back(b);
-    request_.body = std::move(vec);
-    return *this;
-}
-
-HTTPRequestBuilder&
-HTTPRequestBuilder::setTimeout(std::chrono::steady_clock::duration timeout)
-{
-    request_.timeout_ms = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
+    body_ = std::move(body);
     return *this;
 }
 

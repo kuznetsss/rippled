@@ -55,8 +55,6 @@ mod bridge {
         method: HttpMethod,
         url: String,
         headers: Vec<HttpHeader>,
-        body: Vec<u8>,
-        has_timeout: bool,
         timeout_ms: u64,
         max_response_bytes: usize,
     }
@@ -166,7 +164,7 @@ mod bridge {
         /// `UniquePtr` is dropped before the task runs and the `CompletionGuard`
         /// calls `complete` with `RequestError::Canceled` — C++ needs no
         /// separate failure handling.
-        fn http_request(req: Request, completion: UniquePtr<HttpCompletion>);
+        fn http_request(request: Request, body: &[u8], completion: UniquePtr<HttpCompletion>);
     }
 
     unsafe extern "C++" {

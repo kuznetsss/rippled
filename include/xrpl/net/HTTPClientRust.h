@@ -16,10 +16,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <span>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace xrpl {
 
@@ -34,18 +34,21 @@ class HTTPRequestBuilder
 {
 private:
     ::rs::http_client::Request request_;
+    std::vector<uint8_t> body_;
 
 public:
-    HTTPRequestBuilder(std::string_view url, ::rs::http_client::HTTPMethod method);
+    static constexpr size_t kDefaultMaxResponseSize = 2 * 1024 * 1024;
+
+    HTTPRequestBuilder(
+        std::string_view url,
+        ::rs::http_client::HTTPMethod method,
+        std::chrono::steady_clock::duration timeout);
 
     HTTPRequestBuilder&
     addHeader(std::string_view name, std::string_view value);
 
     HTTPRequestBuilder&
-    setBody(std::span<uint8_t const> body);
-
-    HTTPRequestBuilder&
-    setTimeout(std::chrono::steady_clock::duration timeout);
+    setBody(std::vector<uint8_t> body);
 
     HTTPRequestBuilder&
     setMaxResponseSize(size_t size);
@@ -56,17 +59,31 @@ public:
     {
         auto initiation = [](auto handler,
                              boost::asio::any_io_executor executor,
-                             ::rs::http_client::Request request) {
+                             ::rs::http_client::Request request,
+                             std::vector<uint8_t> body) {
             using HandlerType = std::decay_t<decltype(handler)>;
             std::unique_ptr<detail::HTTPCompletion> completion =
                 std::make_unique<detail::HTTPCompletionImpl<HandlerType>>(
                     std::move(handler), std::move(executor));
-            ::rs::http_client::http_request(std::move(request), std::move(completion));
+            // http_request copies the slice synchronously (Rust-side to_vec)
+            // before returning, so `body` outliving this call is sufficient.
+            // An empty vector's data() may be null; pass a default (non-null,
+            // zero-length) slice in that case to avoid UB when cxx rebuilds the
+            // Rust &[u8].
+            rust::Slice<uint8_t const> bodySlice = body.empty()
+                ? rust::Slice<uint8_t const>{}
+                : rust::Slice<uint8_t const>(body.data(), body.size());
+            ::rs::http_client::http_request(
+                std::move(request), bodySlice, std::move(completion));
         };
         return boost::asio::async_initiate<
             CompletionToken,
             void(boost::system::error_code, ::rs::http_client::Response)>(
-            std::move(initiation), token, std::move(executor), std::move(request_));
+            std::move(initiation),
+            token,
+            std::move(executor),
+            std::move(request_),
+            std::move(body_));
     }
 
     /*
