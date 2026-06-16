@@ -59,14 +59,8 @@ toErrorCode(::rs::http_client::RequestError code)
             return {};
         case ::rs::http_client::RequestError::Timeout:
             return errc::make_error_code(errc::timed_out);
-        case ::rs::http_client::RequestError::Connect:
-            return errc::make_error_code(errc::connection_refused);
-        case ::rs::http_client::RequestError::Dns:
-            return errc::make_error_code(errc::host_unreachable);
-        case ::rs::http_client::RequestError::Tls:
-            return errc::make_error_code(errc::protocol_error);
-        case ::rs::http_client::RequestError::BadStatus:
-            return errc::make_error_code(errc::bad_address);
+        case ::rs::http_client::RequestError::Failed:
+            return errc::make_error_code(errc::io_error);
         case ::rs::http_client::RequestError::TooLarge:
             return errc::make_error_code(errc::value_too_large);
         case ::rs::http_client::RequestError::Canceled:

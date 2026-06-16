@@ -77,14 +77,11 @@ mod bridge {
         Ok,
         /// The request timed out.
         Timeout,
-        /// TCP connection could not be established.
-        Connect,
-        /// DNS resolution failed.
-        Dns,
-        /// TLS handshake or certificate error.
-        Tls,
-        /// Server returned an unexpected HTTP status.
-        BadStatus,
+        /// Any other failure while performing the request — connection, DNS,
+        /// TLS, malformed request, mid-stream body error, etc.  reqwest does
+        /// not expose a typed way to tell these apart, so they share one code;
+        /// the specific cause is preserved in `RequestResult::message`.
+        Failed,
         /// Response body exceeded `max_response_bytes`.
         TooLarge,
         /// Request was cancelled (e.g. runtime shutdown dropped the task).

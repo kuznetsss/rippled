@@ -3,6 +3,11 @@
 //! The bridge structs (`Response`, `RequestResult`) are ordinary Rust types
 //! defined by the cxx macro. Inherent impls added here keep construction sites
 //! tidy and give a single place to update if the struct fields change.
+//!
+//! Success and generic-error construction is handled by the
+//! `From<Result<Response, RequestFailure>> for RequestResult` impl in
+//! `request.rs`. Only the `Canceled` path (used by `CompletionGuard::drop`)
+//! is kept here.
 
 use crate::ffi::{RequestError, RequestResult, Response};
 
@@ -18,32 +23,10 @@ impl Response {
 }
 
 impl RequestResult {
-    /// Construct a successful result carrying the given response.
-    pub(crate) fn ok(response: Response) -> Self {
-        RequestResult {
-            code: RequestError::Ok,
-            message: String::new(),
-            response,
-        }
-    }
-
     /// Construct a canceled result with a human-readable `message`.
     pub(crate) fn canceled(message: &str) -> Self {
         RequestResult {
             code: RequestError::Canceled,
-            message: message.to_owned(),
-            response: Response::empty(),
-        }
-    }
-
-    /// Construct a failure result with an explicit `code` and `message`.
-    ///
-    /// The `response` field is set to [`Response::empty`].  Use this for any
-    /// in-flight error other than cancellation (e.g. `NotInitialized`,
-    /// `Timeout`, `Connect`, `TooLarge`).
-    pub(crate) fn error(code: RequestError, message: &str) -> Self {
-        RequestResult {
-            code,
             message: message.to_owned(),
             response: Response::empty(),
         }

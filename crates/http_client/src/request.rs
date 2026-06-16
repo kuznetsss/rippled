@@ -4,7 +4,8 @@
 //! without involving any C++ types:
 //!
 //! - [`execute`] is a pure `async fn` that takes only Rust types and returns
-//!   a [`RequestResult`].  It can be called from `#[tokio::test]` directly.
+//!   `Result<Response, RequestFailure>`.  It can be called from
+//!   `#[tokio::test]` directly.
 //! - [`http_request`] is the thin FFI wrapper that creates a
 //!   [`CompletionGuard`], spawns the task, and bridges the result back to C++.
 
@@ -17,6 +18,39 @@ use crate::ffi::{
 };
 use crate::runtime::Runtime;
 use cxx::UniquePtr;
+
+// ---------------------------------------------------------------------------
+// Internal error type
+// ---------------------------------------------------------------------------
+
+/// A request-level failure, carrying the error discriminant and a human
+/// message.  This is an internal type; it is converted to [`RequestResult`]
+/// exactly once at the FFI boundary via the [`From`] impl below.
+pub(crate) struct RequestFailure {
+    pub(crate) code: RequestError,
+    pub(crate) message: String,
+}
+
+// ---------------------------------------------------------------------------
+// Single conversion point: Result<Response, RequestFailure> → RequestResult
+// ---------------------------------------------------------------------------
+
+impl From<Result<Response, RequestFailure>> for RequestResult {
+    fn from(r: Result<Response, RequestFailure>) -> Self {
+        match r {
+            Ok(response) => RequestResult {
+                code: RequestError::Ok,
+                message: String::new(),
+                response,
+            },
+            Err(f) => RequestResult {
+                code: f.code,
+                message: f.message,
+                response: Response::empty(),
+            },
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // FFI entry point
@@ -36,7 +70,7 @@ pub(crate) fn http_request(request: Request, body: &[u8], completion: UniquePtr<
     // Enqueue failure is propagated through CompletionGuard (Canceled on drop).
     let _ = Runtime::spawn(async move {
         let result = execute(request, body).await;
-        guard.complete(result);
+        guard.complete(result.into());
     });
 }
 
@@ -44,7 +78,8 @@ pub(crate) fn http_request(request: Request, body: &[u8], completion: UniquePtr<
 // Pure async logic (unit-testable — no C++ types)
 // ---------------------------------------------------------------------------
 
-/// Execute an HTTP request and return a [`RequestResult`].
+/// Execute an HTTP request and return a [`Response`] on success or a
+/// [`RequestFailure`] on error.
 ///
 /// This function is deliberately free of C++ types so it can be called from
 /// `#[tokio::test]` without linking against the cxx bridge stubs.
@@ -54,24 +89,16 @@ pub(crate) fn http_request(request: Request, body: &[u8], completion: UniquePtr<
 /// | Condition | [`RequestError`] |
 /// |-----------|-----------------|
 /// | No client initialised | `NotInitialized` |
-/// | DNS failure | `Dns` |
-/// | Connection refused / TCP error | `Connect` |
 /// | Timeout | `Timeout` |
-/// | TLS handshake / certificate | `Tls` |
+/// | Any other transport failure (connect, DNS, TLS, URL parse, …) | `Failed` (cause in `message`) |
 /// | Body exceeds `max_response_bytes` | `TooLarge` |
-/// | URL parse error | `Connect` (closest semantic match) |
 /// | Non-2xx status | `Ok` (status is surfaced in `Response`) |
-pub(crate) async fn execute(request: Request, body: Vec<u8>) -> RequestResult {
+pub(crate) async fn execute(request: Request, body: Vec<u8>) -> Result<Response, RequestFailure> {
     // ── 1. Obtain the shared client ─────────────────────────────────────────
-    let client = match client::get() {
-        Ok(c) => c,
-        Err(_) => {
-            return RequestResult::error(
-                RequestError::NotInitialized,
-                "TLS context has not been initialised; call init_tls_context first",
-            );
-        }
-    };
+    let client = client::get().map_err(|_| RequestFailure {
+        code: RequestError::NotInitialized,
+        message: "TLS context has not been initialised; call init_tls_context first".to_owned(),
+    })?;
 
     // ── 2. Build the reqwest request ────────────────────────────────────────
     let method = match request.method {
@@ -101,10 +128,7 @@ pub(crate) async fn execute(request: Request, body: Vec<u8>) -> RequestResult {
     }
 
     // ── 3. Send ─────────────────────────────────────────────────────────────
-    let resp = match request_builder.send().await {
-        Ok(r) => r,
-        Err(e) => return RequestResult::error(map_send_error(&e), &e.to_string()),
-    };
+    let resp = request_builder.send().await.map_err(map_reqwest_error)?;
 
     // ── 4. Harvest status + response headers ────────────────────────────────
     let status = resp.status().as_u16();
@@ -137,19 +161,19 @@ pub(crate) async fn execute(request: Request, body: Vec<u8>) -> RequestResult {
         match stream.chunk().await {
             Ok(Some(chunk)) => {
                 if body.len() + chunk.len() > max {
-                    return RequestResult::error(
-                        RequestError::TooLarge,
-                        "response body exceeded max_response_bytes",
-                    );
+                    return Err(RequestFailure {
+                        code: RequestError::TooLarge,
+                        message: "response body exceeded max_response_bytes".to_owned(),
+                    });
                 }
                 body.extend_from_slice(&chunk);
             }
             Ok(None) => break,
-            Err(e) => return RequestResult::error(map_send_error(&e), &e.to_string()),
+            Err(e) => return Err(map_reqwest_error(e)),
         }
     }
 
-    RequestResult::ok(Response {
+    Ok(Response {
         status,
         headers: resp_headers,
         body,
@@ -160,48 +184,24 @@ pub(crate) async fn execute(request: Request, body: Vec<u8>) -> RequestResult {
 // Error classification
 // ---------------------------------------------------------------------------
 
-/// Map a `reqwest::Error` to the closest [`RequestError`] discriminant.
+/// Convert a `reqwest::Error` into a [`RequestFailure`].
 ///
-/// The mapping is best-effort: reqwest does not expose a structured error
-/// hierarchy, so we walk `Error::source()` looking for recognisable types
-/// and fall back to [`RequestError::Connect`] when uncertain.
-fn map_send_error(e: &reqwest::Error) -> RequestError {
-    if e.is_timeout() {
-        return RequestError::Timeout;
+/// reqwest only exposes typed predicates for a handful of phases (timeout,
+/// connect, builder, body, …); it has no structured way to tell a DNS failure
+/// from a TLS error — those distinctions live as opaque, version-dependent text
+/// deep in the hyper/rustls source chain.  Rather than scrape that text (which
+/// silently breaks when the wording changes), we surface only `Timeout`, the
+/// one distinction reqwest reports reliably, and fold every other failure into
+/// `Failed`.  The specific cause is preserved verbatim in the `message`, taken
+/// from `reqwest::Error::to_string()`.
+fn map_reqwest_error(e: reqwest::Error) -> RequestFailure {
+    let code = if e.is_timeout() {
+        RequestError::Timeout
+    } else {
+        RequestError::Failed
+    };
+    RequestFailure {
+        code,
+        message: e.to_string(),
     }
-
-    // Walk the source chain for more specific causes.
-    use std::error::Error as StdError;
-    let mut source = e.source();
-    while let Some(s) = source {
-        let desc = s.to_string().to_lowercase();
-        if desc.contains("dns")
-            || desc.contains("resolve")
-            || desc.contains("no such host")
-            || desc.contains("name or service not known")
-        {
-            return RequestError::Dns;
-        }
-        if desc.contains("tls")
-            || desc.contains("certificate")
-            || desc.contains("handshake")
-            || desc.contains("rustls")
-            || desc.contains("invalid cert")
-        {
-            return RequestError::Tls;
-        }
-        source = s.source();
-    }
-
-    // reqwest's is_connect() covers connection-refused and similar TCP errors.
-    if e.is_connect() {
-        return RequestError::Connect;
-    }
-
-    // URL parse errors surface as neither timeout nor connect.
-    if e.is_builder() {
-        return RequestError::Connect;
-    }
-
-    RequestError::Connect
 }
