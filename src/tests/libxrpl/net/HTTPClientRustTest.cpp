@@ -28,12 +28,6 @@ using namespace xrpl;
 
 namespace {
 
-// Minimal HTTP/1.1 server over loopback, mirroring the Beast-based server in
-// the sibling HTTPClient.cpp test.  It accepts one connection at a time,
-// records the request method/target/body, and replies with a canned status and
-// body.  The actual client socket I/O happens on Tokio worker threads inside
-// the Rust crate; this server only needs its own io_context pumped so the
-// accept/serve coroutine makes progress.
 class TestHTTPServer
 {
 private:
@@ -179,13 +173,9 @@ private:
 
 }  // namespace
 
-// ---------------------------------------------------------------------------
-// Fixture.
-//
 // The Tokio runtime is a process-wide OnceLock: initialise it once for the
 // whole suite.  The reqwest client (TLS context) is rebuilt before each test
 // with verification disabled, which is sufficient for plain-HTTP loopback.
-// ---------------------------------------------------------------------------
 class HTTPClientRustTest : public ::testing::Test
 {
 protected:
@@ -228,9 +218,8 @@ protected:
     }
 };
 
-// Drive `ioc` on the current thread.  The completion handler is expected to
-// call ioc.stop() when it fires, which makes run() return promptly; the
-// deadline timer is only a safety net that bounds a hung test.
+// Drive `ioc` on the current thread.  The deadline timer is a safety net that
+// bounds a hung test; the completion handler stops ioc normally.
 static void
 runWithDeadline(boost::asio::io_context& ioc, std::chrono::seconds timeout = std::chrono::seconds(15))
 {
@@ -244,11 +233,6 @@ runWithDeadline(boost::asio::io_context& ioc, std::chrono::seconds timeout = std
     deadline.cancel();
 }
 
-// ---------------------------------------------------------------------------
-// Round-trip: a POST whose body the server echoes back to us.  Validates the
-// request-body marshaling fix (server receives the exact bytes) and the
-// response-body path (body returned intact).
-// ---------------------------------------------------------------------------
 TEST_F(HTTPClientRustTest, PostBodyRoundTrip)
 {
     TestHTTPServer server;
@@ -288,10 +272,6 @@ TEST_F(HTTPClientRustTest, PostBodyRoundTrip)
     EXPECT_EQ(got, responseBody);
 }
 
-// ---------------------------------------------------------------------------
-// A larger response body to exercise the Content-Length-based reservation and
-// chunked accumulation path without truncation.
-// ---------------------------------------------------------------------------
 TEST_F(HTTPClientRustTest, LargeResponseBody)
 {
     TestHTTPServer server;
@@ -319,10 +299,6 @@ TEST_F(HTTPClientRustTest, LargeResponseBody)
     EXPECT_EQ(resultExp->body.size(), responseBody.size());
 }
 
-// ---------------------------------------------------------------------------
-// The completion handler must be dispatched on the io_context thread, not a
-// Tokio worker thread.
-// ---------------------------------------------------------------------------
 TEST_F(HTTPClientRustTest, HandlerOnIocThread)
 {
     TestHTTPServer server;
@@ -349,10 +325,6 @@ TEST_F(HTTPClientRustTest, HandlerOnIocThread)
         << "handler was not dispatched onto the io_context thread";
 }
 
-// ---------------------------------------------------------------------------
-// use_future token: proves async_initiate genericity with the corrected
-// two-argument completion signature.
-// ---------------------------------------------------------------------------
 TEST_F(HTTPClientRustTest, UseFuture)
 {
     TestHTTPServer server;
@@ -380,11 +352,6 @@ TEST_F(HTTPClientRustTest, UseFuture)
     EXPECT_EQ(got, "future body");
 }
 
-// ---------------------------------------------------------------------------
-// Error path: with no TLS context (reqwest client) initialised, a request must
-// complete with NotInitialized -> operation_not_permitted, delivered on the
-// io_context thread.  No network is involved.
-// ---------------------------------------------------------------------------
 TEST_F(HTTPClientRustTest, NotInitializedSurfacesError)
 {
     // SetUp() built a client; drop it so the request short-circuits.

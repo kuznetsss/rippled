@@ -19,23 +19,6 @@
 
 namespace xrpl::detail {
 
-/** Completion state for one in-flight request, handed to Rust as an opaque
- *  @c HTTPCompletion.
- *
- *  Stores the decay-copied handler and an executor work guard that keeps the
- *  @c io_context alive while the request is in flight.
- *
- *  The handler's associated executor is type-erased into an @c any_io_executor
- *  rather than a second template parameter, since @c asyncRequest only ever
- *  supplies that fallback.
- *
- *  @tparam Handler  User completion handler, invoked as
- *                   @c handler(std::expected<rs::http_client::Response, HttpError>).
- *
- *  @note Per-operation cancellation is unsupported.  The request ends only by
- *        completing normally or via runtime shutdown (which triggers
- *        @c RequestError::Canceled through the Rust @c CompletionGuard).
- */
 template <class Handler>
 class HTTPCompletionImpl final : public HTTPCompletion
 {
@@ -55,9 +38,6 @@ public:
     void
     complete(::rs::http_client::RequestResult result) override
     {
-        // Build the expected value before moving off this: on Ok the expected
-        // holds the response; on any error it holds an HttpError with the code
-        // and the human-readable message (the sole discriminator for Failed).
         std::expected<::rs::http_client::Response, HttpError> expectedResult =
             (result.code == ::rs::http_client::RequestError::Ok)
             ? std::expected<::rs::http_client::Response, HttpError>{std::move(result.response)}
@@ -66,8 +46,7 @@ public:
         // Move handler and result off `this` before posting: the Rust
         // UniquePtr destroys `this` as soon as complete() returns.
         auto h = std::move(handler_);
-        // Capture the work guard in the lambda so the io_context stays alive
-        // until the handler runs; it is released before the handler fires to
+        // Work guard is released inside the lambda before the handler fires to
         // avoid potential deadlocks on io_context::stop().
         boost::asio::post(
             executor_,

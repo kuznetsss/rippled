@@ -25,13 +25,6 @@ namespace xrpl {
 //
 // }  // namespace detail
 
-/** Error type returned by @c asyncSubmit on failure.
- *
- *  Mirrors the Rust-internal @c RequestFailure (code + human-readable string).
- *  The @c message field is the sole discriminator for @c RequestError::Failed:
- *  reqwest folds connect, DNS, TLS, and parse errors into that single variant,
- *  preserving the cause only in the message string.
- */
 struct HttpError
 {
     ::rs::http_client::RequestError code;
