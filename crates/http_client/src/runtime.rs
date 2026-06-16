@@ -60,3 +60,26 @@ impl Runtime {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// End-to-end lifecycle: not-initialized → init → double-init error →
+    /// spawn succeeds → shutdown → spawn fails.
+    ///
+    /// Uses `#[serial]` because `RUNTIME` is a process-wide `OnceLock`.
+    /// No other test in this suite must touch `RUNTIME`.
+    /// This is NOT a `#[tokio::test]` — the test manages the runtime itself.
+    #[serial_test::serial]
+    #[test]
+    fn runtime_lifecycle() {
+        use std::time::Duration;
+        assert!(matches!(Runtime::spawn(async {}), Err(Error::NotInitialized)));
+        assert!(Runtime::init(1).is_ok());
+        assert!(matches!(Runtime::init(1), Err(Error::AlreadyInitialized)));
+        assert!(Runtime::spawn(async {}).is_ok());
+        assert!(Runtime::shutdown(Duration::from_millis(100)).is_ok());
+        assert!(matches!(Runtime::spawn(async {}), Err(Error::ShutDown)));
+    }
+}

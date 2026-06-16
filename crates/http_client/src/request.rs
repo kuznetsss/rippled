@@ -20,7 +20,16 @@ pub(crate) fn http_request(request: Request, body: &[u8], completion: UniquePtr<
 /// Pure async entry point — no C++ types, directly testable with `#[tokio::test]`.
 pub(crate) async fn execute(request: Request, body: Vec<u8>) -> Result<Response, RequestFailure> {
     let client = client::get().map_err(|_| RequestFailure::NotInitialized)?;
+    execute_with(&client, request, body).await
+}
 
+/// Pure async worker — takes an already-resolved client, so tests can inject
+/// a local `reqwest::Client` without touching the `CLIENT` global.
+async fn execute_with(
+    client: &reqwest::Client,
+    request: Request,
+    body: Vec<u8>,
+) -> Result<Response, RequestFailure> {
     let method = match request.method {
         HttpMethod::Get => reqwest::Method::GET,
         HttpMethod::Post => reqwest::Method::POST,
@@ -83,4 +92,101 @@ pub(crate) async fn execute(request: Request, body: Vec<u8>) -> Result<Response,
         headers: resp_headers,
         body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build a minimal GET request pointing at `url`.
+    fn req(url: String, max_response_bytes: usize) -> Request {
+        Request {
+            method: HttpMethod::Get,
+            url,
+            headers: vec![],
+            timeout_ms: 5000,
+            max_response_bytes,
+        }
+    }
+
+    // Helper that constructs a plain reqwest::Client without touching CLIENT global.
+    fn local_client() -> reqwest::Client {
+        reqwest::Client::builder().build().unwrap()
+    }
+
+    /// Happy path: 200 with a body and a custom response header.
+    #[tokio::test]
+    async fn happy_path_200_with_body_and_header() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-reply", "yes")
+                    .set_body_string("hello"),
+            )
+            .mount(&server)
+            .await;
+
+        let client = local_client();
+        let resp = execute_with(&client, req(server.uri(), 1_000_000), vec![])
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"hello");
+        // The custom header must appear in the response headers.
+        let header = resp
+            .headers
+            .iter()
+            .find(|h| h.name == "x-reply")
+            .expect("x-reply header missing");
+        assert_eq!(header.value, "yes");
+    }
+
+    /// Body exceeding `max_response_bytes` must yield `TooLarge`.
+    #[tokio::test]
+    async fn max_response_bytes_enforcement() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(100)))
+            .mount(&server)
+            .await;
+
+        let client = local_client();
+        // Allow only 10 bytes; the 100-byte body must trip the limit.
+        let result = execute_with(&client, req(server.uri(), 10), vec![]).await;
+        assert!(matches!(result, Err(RequestFailure::TooLarge)));
+    }
+
+    /// A header with an invalid value (embedded newline) must be rejected
+    /// before the network is even hit.
+    #[tokio::test]
+    async fn invalid_header_value_rejected() {
+        // No mock server needed — the error fires during header construction.
+        let client = local_client();
+        let mut r = req("http://127.0.0.1:1".to_string(), 1_000_000);
+        r.headers.push(HttpHeader {
+            name: "x-test".to_string(),
+            value: "bad\nvalue".to_string(),
+        });
+        let result = execute_with(&client, r, vec![]).await;
+        assert!(matches!(result, Err(RequestFailure::InvalidHeaderValue(_))));
+    }
+
+    /// A header with an invalid name (embedded space) must also be rejected.
+    #[tokio::test]
+    async fn invalid_header_name_rejected() {
+        let client = local_client();
+        let mut r = req("http://127.0.0.1:1".to_string(), 1_000_000);
+        r.headers.push(HttpHeader {
+            name: "bad header".to_string(),
+            value: "value".to_string(),
+        });
+        let result = execute_with(&client, r, vec![]).await;
+        assert!(matches!(result, Err(RequestFailure::InvalidHeaderName(_))));
+    }
 }

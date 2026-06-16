@@ -6,9 +6,12 @@ resolver = "3"
 anyhow = "1.0.102"
 cxx = { version = "1.0.194", features = ["c++20"] }
 reqwest = "0.13.4"
+serial_test = "3.5.0"
+tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", features = ["full"] }
 tokio-util = "0.7.18"
+wiremock = "0.6.5"
 
 [workspace.package]
 edition = "2024"

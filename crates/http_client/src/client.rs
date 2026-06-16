@@ -76,3 +76,105 @@ fn build_client(config: &TlsConfig) -> Result<reqwest::Client> {
 
     builder.build().map_err(Error::TlsConfig)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::ErrorCode;
+
+    // ── build_client tests (global-free, plain #[test]) ───────────────────────
+
+    /// `verify: false` disables certificate checking; the builder should succeed.
+    #[test]
+    fn build_client_verify_false() {
+        let cfg = TlsConfig {
+            verify: false,
+            verify_file: String::new(),
+            verify_dir: String::new(),
+        };
+        assert!(build_client(&cfg).is_ok());
+    }
+
+    /// `verify: true` with no custom paths uses the default system roots.
+    #[test]
+    fn build_client_verify_true_defaults() {
+        let cfg = TlsConfig {
+            verify: true,
+            verify_file: String::new(),
+            verify_dir: String::new(),
+        };
+        assert!(build_client(&cfg).is_ok());
+    }
+
+    /// A `verify_file` that does not exist must produce `CertificateReading`.
+    #[test]
+    fn build_client_nonexistent_verify_file() {
+        let cfg = TlsConfig {
+            verify: true,
+            verify_file: "/this/path/does/not/exist.pem".to_string(),
+            verify_dir: String::new(),
+        };
+        let err = build_client(&cfg).unwrap_err();
+        assert!(matches!(err, Error::CertificateReading(_)));
+    }
+
+    /// A file with a valid PEM header but invalid base64 body must produce
+    /// `TlsConfig` — reqwest returns an error for malformed base64 inside a PEM
+    /// section (pure garbage with no PEM markers is silently skipped instead).
+    #[test]
+    fn build_client_garbage_verify_file() {
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Must have a PEM header so the parser enters the section and then
+        // fails on the non-base64 body — pure-garbage files yield Ok(vec![]).
+        std::io::Write::write_all(
+            &mut tmp,
+            b"-----BEGIN CERTIFICATE-----\nnot_valid_base64_garbage!!!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let cfg = TlsConfig {
+            verify: true,
+            verify_file: tmp.path().to_str().unwrap().to_string(),
+            verify_dir: String::new(),
+        };
+        let err = build_client(&cfg).unwrap_err();
+        assert!(matches!(err, Error::TlsConfig(_)));
+    }
+
+    /// A `verify_dir` containing only junk files (no valid certs) is silently
+    /// skipped — the builder should still succeed (no certs merged).
+    #[test]
+    fn build_client_junk_verify_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("junk.pem"), b"not a cert").unwrap();
+        let cfg = TlsConfig {
+            verify: true,
+            verify_file: String::new(),
+            verify_dir: dir.path().to_str().unwrap().to_string(),
+        };
+        // Junk files are silently skipped; no error expected.
+        assert!(build_client(&cfg).is_ok());
+    }
+
+    // NOTE: A test for a valid verify_file containing a real PEM certificate is
+    // intentionally omitted — generating a proper cert fixture is out of scope.
+
+    // ── Global lifecycle test (serial, must be isolated) ─────────────────────
+
+    /// Verifies the full init → get → reset cycle for the CLIENT global.
+    /// Runs with `#[serial]` so no other test observes intermediate state.
+    #[serial_test::serial]
+    #[test]
+    fn tls_context_lifecycle() {
+        let _ = reset_tls_context(); // drive to known-clean state
+        assert!(matches!(get(), Err(Error::NotInitialized)));
+        let cfg = TlsConfig {
+            verify: false,
+            verify_file: String::new(),
+            verify_dir: String::new(),
+        };
+        assert!(matches!(init_tls_context(cfg).code, ErrorCode::Ok));
+        assert!(get().is_ok());
+        assert!(matches!(reset_tls_context().code, ErrorCode::Ok));
+        assert!(matches!(get(), Err(Error::NotInitialized)));
+    }
+}
