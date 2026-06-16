@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
+#include <expected>
 #include <string>
 #include <thread>
 #include <vector>
@@ -258,8 +259,7 @@ TEST_F(HTTPClientRustTest, PostBodyRoundTrip)
     std::vector<uint8_t> bodyBytes(requestBody.begin(), requestBody.end());
 
     bool done = false;
-    boost::system::error_code resultEc;
-    ::rs::http_client::Response resultResp;
+    std::expected<::rs::http_client::Response, xrpl::HttpError> resultExp;
 
     HTTPRequestBuilder(
         url(server, "/echo"), ::rs::http_client::HTTPMethod::Post, std::chrono::seconds(5))
@@ -267,9 +267,8 @@ TEST_F(HTTPClientRustTest, PostBodyRoundTrip)
         .setBody(std::move(bodyBytes))
         .asyncSubmit(
             server.ioc().get_executor(),
-            [&](boost::system::error_code ec, ::rs::http_client::Response resp) {
-                resultEc = ec;
-                resultResp = std::move(resp);
+            [&](std::expected<::rs::http_client::Response, xrpl::HttpError> exp) {
+                resultExp = std::move(exp);
                 done = true;
                 server.ioc().stop();
             });
@@ -277,15 +276,15 @@ TEST_F(HTTPClientRustTest, PostBodyRoundTrip)
     runWithDeadline(server.ioc());
 
     ASSERT_TRUE(done) << "handler did not fire in time";
-    EXPECT_FALSE(resultEc) << resultEc.message();
-    EXPECT_EQ(resultResp.status, 200);
+    ASSERT_TRUE(resultExp.has_value()) << static_cast<int>(resultExp.error().code) << ": " << resultExp.error().message;
+    EXPECT_EQ(resultExp->status, 200);
 
     EXPECT_EQ(server.lastMethod(), "POST");
     EXPECT_EQ(server.lastTarget(), "/echo");
     EXPECT_EQ(server.lastBody(), requestBody);
 
     std::string const got(
-        reinterpret_cast<char const*>(resultResp.body.data()), resultResp.body.size());
+        reinterpret_cast<char const*>(resultExp->body.data()), resultExp->body.size());
     EXPECT_EQ(got, responseBody);
 }
 
@@ -300,16 +299,14 @@ TEST_F(HTTPClientRustTest, LargeResponseBody)
     server.setResponseBody(responseBody);
 
     bool done = false;
-    boost::system::error_code resultEc;
-    ::rs::http_client::Response resultResp;
+    std::expected<::rs::http_client::Response, xrpl::HttpError> resultExp;
 
     HTTPRequestBuilder(
         url(server, "/large"), ::rs::http_client::HTTPMethod::Get, std::chrono::seconds(5))
         .asyncSubmit(
             server.ioc().get_executor(),
-            [&](boost::system::error_code ec, ::rs::http_client::Response resp) {
-                resultEc = ec;
-                resultResp = std::move(resp);
+            [&](std::expected<::rs::http_client::Response, xrpl::HttpError> exp) {
+                resultExp = std::move(exp);
                 done = true;
                 server.ioc().stop();
             });
@@ -317,9 +314,9 @@ TEST_F(HTTPClientRustTest, LargeResponseBody)
     runWithDeadline(server.ioc());
 
     ASSERT_TRUE(done) << "handler did not fire in time";
-    EXPECT_FALSE(resultEc) << resultEc.message();
-    EXPECT_EQ(resultResp.status, 200);
-    EXPECT_EQ(resultResp.body.size(), responseBody.size());
+    ASSERT_TRUE(resultExp.has_value()) << static_cast<int>(resultExp.error().code) << ": " << resultExp.error().message;
+    EXPECT_EQ(resultExp->status, 200);
+    EXPECT_EQ(resultExp->body.size(), responseBody.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +335,7 @@ TEST_F(HTTPClientRustTest, HandlerOnIocThread)
         url(server, "/thread"), ::rs::http_client::HTTPMethod::Get, std::chrono::seconds(5))
         .asyncSubmit(
             server.ioc().get_executor(),
-            [&](boost::system::error_code /*ec*/, ::rs::http_client::Response /*resp*/) {
+            [&](std::expected<::rs::http_client::Response, xrpl::HttpError> /*exp*/) {
                 handlerThreadId = std::this_thread::get_id();
                 done = true;
                 server.ioc().stop();
@@ -369,16 +366,17 @@ TEST_F(HTTPClientRustTest, UseFuture)
 
     std::thread runner([&] { server.ioc().run(); });
 
-    ::rs::http_client::Response result;
+    std::expected<::rs::http_client::Response, xrpl::HttpError> result;
     ASSERT_NO_THROW(result = fut.get());
 
     // Stop the acceptor on the server's own thread, then let run() drain.
     boost::asio::post(server.ioc(), [&server] { server.stop(); });
     runner.join();
 
-    EXPECT_EQ(result.status, 200);
+    ASSERT_TRUE(result.has_value()) << static_cast<int>(result.error().code) << ": " << result.error().message;
+    EXPECT_EQ(result->status, 200);
     std::string const got(
-        reinterpret_cast<char const*>(result.body.data()), result.body.size());
+        reinterpret_cast<char const*>(result->body.data()), result->body.size());
     EXPECT_EQ(got, "future body");
 }
 
@@ -394,14 +392,14 @@ TEST_F(HTTPClientRustTest, NotInitializedSurfacesError)
 
     boost::asio::io_context ioc;
     bool done = false;
-    boost::system::error_code resultEc;
+    std::expected<::rs::http_client::Response, xrpl::HttpError> resultExp;
 
     HTTPRequestBuilder(
         "http://127.0.0.1:1/never", ::rs::http_client::HTTPMethod::Get, std::chrono::seconds(5))
         .asyncSubmit(
             ioc.get_executor(),
-            [&](boost::system::error_code ec, ::rs::http_client::Response /*resp*/) {
-                resultEc = ec;
+            [&](std::expected<::rs::http_client::Response, xrpl::HttpError> exp) {
+                resultExp = std::move(exp);
                 done = true;
                 ioc.stop();
             });
@@ -409,5 +407,6 @@ TEST_F(HTTPClientRustTest, NotInitializedSurfacesError)
     runWithDeadline(ioc, std::chrono::seconds(5));
 
     ASSERT_TRUE(done) << "handler did not fire in time";
-    EXPECT_EQ(resultEc, boost::system::errc::operation_not_permitted);
+    ASSERT_FALSE(resultExp.has_value());
+    EXPECT_EQ(resultExp.error().code, ::rs::http_client::RequestError::NotInitialized);
 }

@@ -1,21 +1,16 @@
 #pragma once
 
-// The detail headers below are implementation fragments of this public header,
-// not standalone headers.  This token grants them access; they #error without
-// it so they cannot be included directly.  Undefined at the bottom of the file.
-#define XRPL_NET_HTTPCLIENTRUST_INTERNAL
-#include <xrpl/net/detail/HTTPCompletionImpl.h>
-
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/async_result.hpp>
-#include <boost/system/error_code.hpp>
 
 #include <rs_http_client_cxxbridge/ffi.h>
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -29,6 +24,29 @@ namespace xrpl {
 // struct FailoverState;
 //
 // }  // namespace detail
+
+/** Error type returned by @c asyncSubmit on failure.
+ *
+ *  Mirrors the Rust-internal @c RequestFailure (code + human-readable string).
+ *  The @c message field is the sole discriminator for @c RequestError::Failed:
+ *  reqwest folds connect, DNS, TLS, and parse errors into that single variant,
+ *  preserving the cause only in the message string.
+ */
+struct HttpError
+{
+    ::rs::http_client::RequestError code;
+    std::string message;
+};
+
+}  // namespace xrpl
+
+// The detail headers below are implementation fragments of this public header,
+// not standalone headers.  This token grants them access; they #error without
+// it so they cannot be included directly.  Undefined at the bottom of the file.
+#define XRPL_NET_HTTPCLIENTRUST_INTERNAL
+#include <xrpl/net/detail/HTTPCompletionImpl.h>
+
+namespace xrpl {
 
 class HTTPRequestBuilder
 {
@@ -78,7 +96,7 @@ public:
         };
         return boost::asio::async_initiate<
             CompletionToken,
-            void(boost::system::error_code, ::rs::http_client::Response)>(
+            void(std::expected<::rs::http_client::Response, HttpError>)>(
             std::move(initiation),
             token,
             std::move(executor),

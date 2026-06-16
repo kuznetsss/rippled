@@ -11,20 +11,13 @@
 #include <boost/asio/async_result.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/post.hpp>
-#include <boost/system/errc.hpp>
-#include <boost/system/error_code.hpp>
 
 #include <rs_http_client_cxxbridge/ffi.h>
 
-namespace xrpl::detail {
+#include <expected>
+#include <utility>
 
-/** Map a @c RequestError to a @c boost::system::error_code using
- *  @c boost::system::errc values.  Does not introduce a custom error category.
- *
- *  Defined in HTTPClientRust.cpp so the mapping lives in one translation unit.
- */
-boost::system::error_code
-toErrorCode(::rs::http_client::RequestError code);
+namespace xrpl::detail {
 
 /** Completion state for one in-flight request, handed to Rust as an opaque
  *  @c HTTPCompletion.
@@ -37,7 +30,7 @@ toErrorCode(::rs::http_client::RequestError code);
  *  supplies that fallback.
  *
  *  @tparam Handler  User completion handler, invoked as
- *                   @c handler(error_code, rs::http_client::Response).
+ *                   @c handler(std::expected<rs::http_client::Response, HttpError>).
  *
  *  @note Per-operation cancellation is unsupported.  The request ends only by
  *        completing normally or via runtime shutdown (which triggers
@@ -62,19 +55,27 @@ public:
     void
     complete(::rs::http_client::RequestResult result) override
     {
-        auto ec = toErrorCode(result.code);
-        // Move handler and response off `this` before posting: the Rust
+        // Build the expected value before moving off this: on Ok the expected
+        // holds the response; on any error it holds an HttpError with the code
+        // and the human-readable message (the sole discriminator for Failed).
+        std::expected<::rs::http_client::Response, HttpError> expectedResult =
+            (result.code == ::rs::http_client::RequestError::Ok)
+            ? std::expected<::rs::http_client::Response, HttpError>{std::move(result.response)}
+            : std::unexpected(HttpError{result.code, std::string(result.message)});
+
+        // Move handler and result off `this` before posting: the Rust
         // UniquePtr destroys `this` as soon as complete() returns.
         auto h = std::move(handler_);
-        auto resp = std::move(result.response);
         // Capture the work guard in the lambda so the io_context stays alive
         // until the handler runs; it is released before the handler fires to
         // avoid potential deadlocks on io_context::stop().
         boost::asio::post(
             executor_,
-            [h = std::move(h), ec, resp = std::move(resp), work = std::move(work_)]() mutable {
+            [h = std::move(h),
+             expectedResult = std::move(expectedResult),
+             work = std::move(work_)]() mutable {
                 work.reset();
-                h(ec, std::move(resp));
+                h(std::move(expectedResult));
             });
     }
 };
