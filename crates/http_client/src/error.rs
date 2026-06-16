@@ -1,4 +1,4 @@
-use crate::ffi::{ErrorCode, Status};
+use crate::ffi::{ErrorCode, RequestError, RequestResult, Response, Status};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -52,6 +52,69 @@ impl From<Result<()>> for Status {
             Err(error) => Status {
                 code: (&error).into(),
                 message: error.to_string(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RequestFailure {
+    #[error("TLS context has not been initialized; call init_tls_context first")]
+    NotInitialized,
+    #[error("invalid HTTP header name: {0}")]
+    InvalidHeaderName(String),
+    #[error("invalid HTTP header value: {0}")]
+    InvalidHeaderValue(String),
+    #[error("response body exceeded max_response_bytes")]
+    TooLarge,
+    #[error("request task was dropped")]
+    Canceled,
+    // Both preserve the reqwest cause string; only the code differs.
+    #[error(transparent)]
+    Timeout(reqwest::Error),
+    #[error(transparent)]
+    Transport(reqwest::Error),
+}
+
+impl From<reqwest::Error> for RequestFailure {
+    fn from(e: reqwest::Error) -> Self {
+        if e.is_timeout() {
+            RequestFailure::Timeout(e)
+        } else {
+            RequestFailure::Transport(e)
+        }
+    }
+}
+
+impl From<&RequestFailure> for RequestError {
+    fn from(f: &RequestFailure) -> Self {
+        // Exhaustive: a new RequestFailure variant without a RequestError
+        // code fails to compile, keeping the FFI mirror in sync.
+        match f {
+            RequestFailure::NotInitialized => RequestError::NotInitialized,
+            RequestFailure::InvalidHeaderName(_) | RequestFailure::InvalidHeaderValue(_) => {
+                RequestError::InvalidHeader
+            }
+            RequestFailure::TooLarge => RequestError::TooLarge,
+            RequestFailure::Canceled => RequestError::Canceled,
+            RequestFailure::Timeout(_) => RequestError::Timeout,
+            RequestFailure::Transport(_) => RequestError::Failed,
+        }
+    }
+}
+
+impl From<std::result::Result<Response, RequestFailure>> for RequestResult {
+    fn from(r: std::result::Result<Response, RequestFailure>) -> Self {
+        match r {
+            Ok(response) => RequestResult {
+                code: RequestError::Ok,
+                message: String::new(),
+                response,
+            },
+            Err(f) => RequestResult {
+                code: (&f).into(),
+                message: f.to_string(),
+                response: Response::empty(),
             },
         }
     }

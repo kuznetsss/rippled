@@ -43,18 +43,15 @@ public:
             ? std::expected<::rs::http_client::Response, HttpError>{std::move(result.response)}
             : std::unexpected(HttpError{result.code, std::string(result.message)});
 
-        // Move handler and result off `this` before posting: the Rust
-        // UniquePtr destroys `this` as soon as complete() returns.
-        auto h = std::move(handler_);
         // Work guard is released inside the lambda before the handler fires to
         // avoid potential deadlocks on io_context::stop().
         boost::asio::post(
             executor_,
-            [h = std::move(h),
+            [handler = std::move(handler_),
              expectedResult = std::move(expectedResult),
              work = std::move(work_)]() mutable {
                 work.reset();
-                h(std::move(expectedResult));
+                handler(std::move(expectedResult));
             });
     }
 };

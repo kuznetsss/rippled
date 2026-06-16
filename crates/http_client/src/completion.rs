@@ -1,3 +1,4 @@
+use crate::error::RequestFailure;
 use crate::ffi::{HttpCompletion, RequestResult};
 use cxx::UniquePtr;
 
@@ -30,7 +31,7 @@ impl Drop for CompletionGuard {
     fn drop(&mut self) {
         if let Some(mut c) = self.completion.take() {
             // Task was dropped before completing — signal Canceled to C++.
-            let result = RequestResult::canceled("request task was dropped");
+            let result: RequestResult = Err(RequestFailure::Canceled).into();
             c.pin_mut().complete(result);
         }
     }

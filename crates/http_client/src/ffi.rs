@@ -56,6 +56,7 @@ mod bridge {
         Failed,
         TooLarge,
         Canceled,
+        InvalidHeader,
         NotInitialized,
     }
 
