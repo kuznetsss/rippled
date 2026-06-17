@@ -140,7 +140,7 @@ writeReport(
     unsigned serverThreads,
     unsigned legacyThreads,
     unsigned tokioThreads,
-    unsigned rustDispatchThreads,
+    unsigned controlThreads,
     bool tlsVerify,
     std::string const& timestamp)
 {
@@ -163,10 +163,10 @@ writeReport(
     }
     out << " |\n";
     out << "| Server threads | " << serverThreads << " |\n";
-    out << "| Legacy client threads (Asio io_context) | " << legacyThreads << " |\n";
-    out << "| Rust client threads (Tokio workers + Asio dispatch) | "
-        << tokioThreads << " + " << rustDispatchThreads
-        << " = " << (tokioThreads + rustDispatchThreads) << " total |\n";
+    out << "| Legacy client threads (network runtime + control) | " << legacyThreads
+        << " + " << controlThreads << " = " << (legacyThreads + controlThreads) << " total |\n";
+    out << "| Rust client threads (Tokio runtime + control) | " << tokioThreads
+        << " + " << controlThreads << " = " << (tokioThreads + controlThreads) << " total |\n";
     out << "| TLS verify | " << (tlsVerify ? "yes" : "no") << " |\n";
     out << "| Machine | " << "loopback (in-process server + client)" << " |\n";
     out << "\n";
@@ -278,11 +278,14 @@ writeReport(
            "a fresh connection per request regardless of transport.\n";
     out << "- **Warmup excluded**: the first " << warmup << " requests are unmeasured "
            "and excluded from all statistics.\n";
-    out << "- **Thread-count asymmetry**: legacy uses " << legacyThreads
-        << " Asio thread(s); Rust uses " << tokioThreads << " Tokio worker(s) + "
-        << rustDispatchThreads << " Asio dispatch thread(s) = "
-        << (tokioThreads + rustDispatchThreads) << " total. "
-           "Adjust `--legacy-threads`/`--tokio-threads`/`--rust-dispatch-threads` to equalize.\n";
+    out << "- **Symmetric thread split**: each client runs N runtime threads + "
+        << controlThreads << " control thread(s). Legacy = " << legacyThreads
+        << " network io_context + " << controlThreads << " control = "
+        << (legacyThreads + controlThreads) << "; Rust = " << tokioThreads
+        << " Tokio + " << controlThreads << " control = " << (tokioThreads + controlThreads)
+        << ". The runtime does network I/O; the control io_context fires requests and "
+           "records stats, with completions hopped runtime->control in BOTH paths. "
+           "Adjust `--legacy-threads`/`--tokio-threads`/`--control-threads` to taste.\n";
     out << "- **Measurements are wall-clock**: throughput is (ok+errors)/wallSeconds over "
            "the measured window; CPU ms/req is (user+sys CPU) / total requests.\n";
 }
@@ -312,11 +315,11 @@ main(int argc, char* argv[])
         ("server-threads",   po::value<unsigned>()->default_value(8),
                              "server io_context thread pool size")
         ("legacy-threads",   po::value<unsigned>()->default_value(2),
-                             "Asio io_context threads for the legacy client")
-        ("rust-dispatch-threads", po::value<unsigned>()->default_value(1),
-                             "Asio threads draining Rust completions")
+                             "legacy client network (runtime) io_context threads")
         ("tokio-threads",    po::value<unsigned>()->default_value(2),
-                             "Tokio worker threads for the Rust client")
+                             "Tokio worker (runtime) threads for the Rust client")
+        ("control-threads",  po::value<unsigned>()->default_value(1),
+                             "control/dispatch threads driving the closed loop (both clients)")
         ("tls-verify",       po::value<bool>()->default_value(true),
                              "verify server cert against embedded CA")
         ("timeout-seconds",  po::value<unsigned>()->default_value(30),
@@ -352,8 +355,8 @@ main(int argc, char* argv[])
     std::string const transportStr   = vm["transport"].as<std::string>();
     unsigned const serverThreads     = vm["server-threads"].as<unsigned>();
     unsigned const legacyThreads     = vm["legacy-threads"].as<unsigned>();
-    unsigned const rustDispatchThr   = vm["rust-dispatch-threads"].as<unsigned>();
     unsigned const tokioThreads      = vm["tokio-threads"].as<unsigned>();
+    unsigned const controlThreads    = vm["control-threads"].as<unsigned>();
     bool const tlsVerify             = vm["tls-verify"].as<bool>();
     unsigned const timeoutSec        = vm["timeout-seconds"].as<unsigned>();
     std::size_t const maxRespBytes   = vm["max-response-bytes"].as<std::size_t>();
@@ -496,7 +499,8 @@ main(int argc, char* argv[])
                 cfg.totalRequests    = requests;
                 cfg.warmupRequests   = warmup;
                 cfg.concurrency      = conc;
-                cfg.clientThreads    = legacyThreads;
+                cfg.ioThreads        = legacyThreads;
+                cfg.controlThreads   = controlThreads;
                 cfg.timeout          = timeout;
                 runLabel(transport, conc, "Legacy", cfg);
             }
@@ -514,7 +518,8 @@ main(int argc, char* argv[])
                 cfg.totalRequests    = requests;
                 cfg.warmupRequests   = warmup;
                 cfg.concurrency      = conc;
-                cfg.clientThreads    = rustDispatchThr;
+                cfg.ioThreads        = tokioThreads;
+                cfg.controlThreads   = controlThreads;
                 cfg.timeout          = timeout;
                 runLabel(transport, conc, "Rust(reuse-on)", cfg);
             }
@@ -532,7 +537,8 @@ main(int argc, char* argv[])
                 cfg.totalRequests    = requests;
                 cfg.warmupRequests   = warmup;
                 cfg.concurrency      = conc;
-                cfg.clientThreads    = rustDispatchThr;
+                cfg.ioThreads        = tokioThreads;
+                cfg.controlThreads   = controlThreads;
                 cfg.timeout          = timeout;
                 cfg.requestConnectionClose = true;
                 runLabel(transport, conc, "Rust(forced-close)", cfg);
@@ -565,7 +571,7 @@ main(int argc, char* argv[])
             serverThreads,
             legacyThreads,
             tokioThreads,
-            rustDispatchThr,
+            controlThreads,
             tlsVerify,
             timestamp);
         std::cout << "Report written to: " << outPath << "\n";

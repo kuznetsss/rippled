@@ -5,7 +5,9 @@
 #include <xrpl/net/HTTPClientRust.h>
 #include <rs_http_client_cxxbridge/ffi.h>
 
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -36,7 +38,18 @@ struct RunConfig
     unsigned totalRequests;        // measured requests
     unsigned warmupRequests;       // unmeasured priming requests
     unsigned concurrency;          // number of in-flight requests held constant
-    unsigned clientThreads;        // asio io_context threads driving the client
+    // Thread split, kept symmetric between the two clients:
+    //   ioThreads      — the async "runtime" doing network I/O. For Legacy this
+    //                    is the network io_context's thread pool; for Rust the
+    //                    Tokio worker pool (set globally via init_tokio_runtime,
+    //                    so runRust does not spawn these itself — the field is
+    //                    informational there).
+    //   controlThreads — the closed-loop driver / completion-dispatch pool (an
+    //                    Asio io_context for BOTH clients): fires the next
+    //                    request and records stats. Completions are hopped from
+    //                    an ioThread onto a controlThread in both paths.
+    unsigned ioThreads;
+    unsigned controlThreads;
     std::chrono::milliseconds timeout;
     // When true (the Rust forced-close cell), send `Connection: close` so the
     // SERVER initiates the TCP close — mirroring the legacy client and keeping
@@ -102,9 +115,19 @@ timevalToSeconds(struct timeval const& tv)
     return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1.0e6;
 }
 
-// Run one closed-loop phase of `count` requests at `concurrency` on a fresh
-// io_context with `clientThreads` threads, using the legacy HTTPClient::get.
-// Latencies are appended to `latenciesOut` when non-null (nullptr => warmup).
+// Run one closed-loop phase of `count` requests at `concurrency`, using the
+// legacy HTTPClient::get. Latencies are appended to `latenciesOut` when
+// non-null (nullptr => warmup).
+//
+// Two io_contexts keep the legacy thread split symmetric with the Rust path:
+//   netIoc     — the async "runtime": resolve / connect / TLS / read / write,
+//                run on `cfg.ioThreads` threads.
+//   controlIoc — the closed-loop driver, run on `cfg.controlThreads` threads:
+//                fires the next request and records stats.
+// HTTPClient::get invokes its completion on netIoc, so the completion hops the
+// result onto controlIoc via post() — exactly as the Rust path hops Tokio
+// completions onto its Asio dispatch io_context. Without that hop the control
+// work would run on the network threads and the split would be meaningless.
 inline void
 runLegacyPhase(
     RunConfig const& cfg,
@@ -114,7 +137,12 @@ runLegacyPhase(
     unsigned& errorsOut,
     std::string& firstErrorOut)
 {
-    boost::asio::io_context ioc;
+    boost::asio::io_context netIoc;
+    boost::asio::io_context controlIoc;
+    // Both contexts must outlive the in-flight requests: netIoc between bursts,
+    // controlIoc between the primed fires and the first posted completions.
+    auto netGuard = boost::asio::make_work_guard(netIoc);
+    auto controlGuard = boost::asio::make_work_guard(controlIoc);
 
     std::atomic<unsigned> launched{0};
     std::atomic<unsigned> completed{0};
@@ -125,7 +153,8 @@ runLegacyPhase(
         ? std::chrono::seconds(1)
         : std::chrono::ceil<std::chrono::seconds>(cfg.timeout);
 
-    // Forward-declare so the lambda can reference itself.
+    // Forward-declare so the lambda can reference itself. Always invoked on a
+    // control thread.
     std::function<void()> fireOne;
     fireOne = [&]()
     {
@@ -141,7 +170,7 @@ runLegacyPhase(
 
         xrpl::HTTPClient::get(
             cfg.tls,
-            ioc,
+            netIoc,
             cfg.host,
             cfg.port,
             cfg.path,
@@ -152,56 +181,76 @@ runLegacyPhase(
                 int status,
                 std::string const& /*data*/) -> bool
             {
+                // Runs on a network thread. Measure here, then hop everything
+                // else onto the control io_context.
                 double const ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - start).count();
+                bool const ok = !ec && status == 200;
+                std::string msg;
+                if (!ok)
+                    msg = ec ? ec.message() : ("status " + std::to_string(status));
 
-                {
-                    std::lock_guard<std::mutex> lk(mu);
-                    if (!ec && status == 200)
+                boost::asio::post(
+                    controlIoc,
+                    [&, ms, ok, msg = std::move(msg)]() mutable
                     {
-                        ++okOut;
-                    }
-                    else
-                    {
-                        ++errorsOut;
-                        if (firstErrorOut.empty())
                         {
-                            if (ec)
-                                firstErrorOut = ec.message();
+                            std::lock_guard<std::mutex> lk(mu);
+                            if (ok)
+                            {
+                                ++okOut;
+                            }
                             else
-                                firstErrorOut = "status " + std::to_string(status);
+                            {
+                                ++errorsOut;
+                                if (firstErrorOut.empty())
+                                    firstErrorOut = std::move(msg);
+                            }
+                            if (latenciesOut)
+                                latenciesOut->push_back(ms);
                         }
-                    }
-                    if (latenciesOut)
-                        latenciesOut->push_back(ms);
-                }
 
-                unsigned const done = completed.fetch_add(1, std::memory_order_acq_rel) + 1;
+                        unsigned const done =
+                            completed.fetch_add(1, std::memory_order_acq_rel) + 1;
 
-                // Fire the next request if there is more work.
-                if (launched.load(std::memory_order_relaxed) < count)
-                    fireOne();
+                        if (launched.load(std::memory_order_relaxed) < count)
+                            fireOne();
 
-                if (done == count)
-                    ioc.stop();
+                        if (done == count)
+                        {
+                            netGuard.reset();
+                            controlGuard.reset();
+                            netIoc.stop();
+                            controlIoc.stop();
+                        }
+                    });
 
                 return false;  // single-site, no retry
             },
             beast::Journal{beast::Journal::getNullSink()});
     };
 
-    // Prime with `concurrency` in-flight requests.
+    // Prime with `concurrency` in-flight requests, fired on a control thread.
     unsigned const primeCount = std::min(cfg.concurrency, count);
     for (unsigned i = 0; i < primeCount; ++i)
-        fireOne();
+        boost::asio::post(controlIoc, [&fireOne]() { fireOne(); });
 
-    // Run io_context on clientThreads threads (spawn clientThreads-1 extras).
-    std::vector<std::thread> threads;
-    threads.reserve(cfg.clientThreads > 0 ? cfg.clientThreads - 1 : 0);
-    for (unsigned i = 1; i < cfg.clientThreads; ++i)
-        threads.emplace_back([&ioc]() { ioc.run(); });
-    ioc.run();
-    for (auto& t : threads)
+    // Network "runtime" threads.
+    std::vector<std::thread> netThreads;
+    netThreads.reserve(cfg.ioThreads);
+    for (unsigned i = 0; i < cfg.ioThreads; ++i)
+        netThreads.emplace_back([&netIoc]() { netIoc.run(); });
+
+    // Control threads: this thread + (controlThreads - 1) extras.
+    std::vector<std::thread> controlThreads;
+    controlThreads.reserve(cfg.controlThreads > 0 ? cfg.controlThreads - 1 : 0);
+    for (unsigned i = 1; i < cfg.controlThreads; ++i)
+        controlThreads.emplace_back([&controlIoc]() { controlIoc.run(); });
+    controlIoc.run();
+
+    for (auto& t : controlThreads)
+        t.join();
+    for (auto& t : netThreads)
         t.join();
 }
 
@@ -288,9 +337,12 @@ runRustPhase(
     for (unsigned i = 0; i < primeCount; ++i)
         fireOne();
 
+    // The Rust runtime (Tokio, cfg.ioThreads workers) is global; here we only
+    // run the control/dispatch io_context that fires requests and receives the
+    // completions posted back by HTTPCompletionImpl.
     std::vector<std::thread> threads;
-    threads.reserve(cfg.clientThreads > 0 ? cfg.clientThreads - 1 : 0);
-    for (unsigned i = 1; i < cfg.clientThreads; ++i)
+    threads.reserve(cfg.controlThreads > 0 ? cfg.controlThreads - 1 : 0);
+    for (unsigned i = 1; i < cfg.controlThreads; ++i)
         threads.emplace_back([&ioc]() { ioc.run(); });
     ioc.run();
     for (auto& t : threads)
