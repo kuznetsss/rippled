@@ -41,6 +41,12 @@ fn build_client(config: &TlsConfig) -> Result<reqwest::Client> {
         // Preserve legacy C++ client behaviour: no redirect following.
         .redirect(reqwest::redirect::Policy::none());
 
+    if config.disable_connection_reuse {
+        // No idle connection is retained, so each request opens a fresh
+        // connection — matching the legacy client's `Connection: close`.
+        builder = builder.pool_max_idle_per_host(0);
+    }
+
     if !config.verify {
         builder = builder
             .tls_danger_accept_invalid_certs(true)
@@ -91,6 +97,7 @@ mod tests {
             verify: false,
             verify_file: String::new(),
             verify_dir: String::new(),
+            disable_connection_reuse: false,
         };
         assert!(build_client(&cfg).is_ok());
     }
@@ -102,6 +109,7 @@ mod tests {
             verify: true,
             verify_file: String::new(),
             verify_dir: String::new(),
+            disable_connection_reuse: false,
         };
         assert!(build_client(&cfg).is_ok());
     }
@@ -113,6 +121,7 @@ mod tests {
             verify: true,
             verify_file: "/this/path/does/not/exist.pem".to_string(),
             verify_dir: String::new(),
+            disable_connection_reuse: false,
         };
         let err = build_client(&cfg).unwrap_err();
         assert!(matches!(err, Error::CertificateReading(_)));
@@ -135,6 +144,7 @@ mod tests {
             verify: true,
             verify_file: tmp.path().to_str().unwrap().to_string(),
             verify_dir: String::new(),
+            disable_connection_reuse: false,
         };
         let err = build_client(&cfg).unwrap_err();
         assert!(matches!(err, Error::TlsConfig(_)));
@@ -150,6 +160,7 @@ mod tests {
             verify: true,
             verify_file: String::new(),
             verify_dir: dir.path().to_str().unwrap().to_string(),
+            disable_connection_reuse: false,
         };
         // Junk files are silently skipped; no error expected.
         assert!(build_client(&cfg).is_ok());
@@ -171,6 +182,7 @@ mod tests {
             verify: false,
             verify_file: String::new(),
             verify_dir: String::new(),
+            disable_connection_reuse: false,
         };
         assert!(matches!(init_tls_context(cfg).code, ErrorCode::Ok));
         assert!(get().is_ok());

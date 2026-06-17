@@ -66,6 +66,12 @@ mod bridge {
         verify_file: String,
         /// Path to a directory of PEM certificates to add on top of active roots.
         verify_dir: String,
+        /// When true, the connection pool is capped at zero idle connections per
+        /// host, forcing a fresh connection (and TLS handshake) for every
+        /// request. Production leaves this false (reqwest's default pooling /
+        /// keep-alive). It exists for benchmarking the no-reuse path against the
+        /// legacy client, which always sends `Connection: close`.
+        disable_connection_reuse: bool,
     }
 
     struct RequestResult {

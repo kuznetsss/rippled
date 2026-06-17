@@ -86,6 +86,23 @@ impl From<reqwest::Error> for RequestFailure {
     }
 }
 
+impl RequestFailure {
+    /// Full message including the underlying cause chain. reqwest's own Display
+    /// is generic ("error sending request for url ..."); the actionable cause
+    /// (connect/DNS/TLS/OS error) lives in `source()`, so flatten the chain.
+    fn detail(&self) -> String {
+        use std::error::Error;
+        let mut message = self.to_string();
+        let mut source = self.source();
+        while let Some(cause) = source {
+            message.push_str(": ");
+            message.push_str(&cause.to_string());
+            source = cause.source();
+        }
+        message
+    }
+}
+
 impl From<&RequestFailure> for RequestError {
     fn from(f: &RequestFailure) -> Self {
         // Exhaustive: a new RequestFailure variant without a RequestError
@@ -113,7 +130,7 @@ impl From<std::result::Result<Response, RequestFailure>> for RequestResult {
             },
             Err(f) => RequestResult {
                 code: (&f).into(),
-                message: f.to_string(),
+                message: f.detail(),
                 response: Response::empty(),
             },
         }

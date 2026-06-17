@@ -142,3 +142,8 @@ if(tests)
     include(CTest)
     add_subdirectory(src/tests/libxrpl)
 endif()
+
+option(bench "Build benchmark tools" OFF)
+if(bench)
+    add_subdirectory(src/bench/http_client)
+endif()
