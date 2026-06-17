@@ -33,7 +33,7 @@
 #include <xrpl/core/NetworkIDService.h>
 #include <xrpl/core/ServiceRegistry.h>
 #include <xrpl/json/to_string.h>
-#include <xrpl/net/HTTPClient.h>
+#include <xrpl/net/HTTPClientRust.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Asset.h>
 #include <xrpl/protocol/ErrorCodes.h>
@@ -90,8 +90,7 @@ Env::AppBundle::AppBundle(
     auto tk = std::make_unique<ManualTimeKeeper>();
     timeKeeper = tk.get();
     // Hack so we don't have to call Config::setup
-    HTTPClient::initializeSSLContext(
-        config->sslVerifyDir, config->sslVerifyFile, config->sslVerify, debugLog());
+    initHTTPClient(2, config->sslVerify, config->sslVerifyFile, config->sslVerifyDir, debugLog());
     owned = makeApplication(std::move(config), std::move(logs), std::move(tk));
     app = owned.get();
     app->getLogs().threshold(thresh);

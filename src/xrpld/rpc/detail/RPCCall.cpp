@@ -18,7 +18,7 @@
 #include <xrpl/json/json_reader.h>
 #include <xrpl/json/json_value.h>
 #include <xrpl/json/to_string.h>
-#include <xrpl/net/HTTPClient.h>
+#include <xrpl/net/HTTPClientRust.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/ApiVersion.h>
 #include <xrpl/protocol/ErrorCodes.h>
@@ -31,7 +31,6 @@
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/streambuf.hpp>
 #include <boost/regex/v5/regex.hpp>
 #include <boost/regex/v5/regex_match.hpp>
 #include <boost/system/detail/error_code.hpp>
@@ -45,7 +44,6 @@
 #include <functional>
 #include <iostream>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -62,34 +60,6 @@ class RPCParser;
 // This ain't Apache.  We're just using HTTP header for the length field
 // and to be compatible with other JSON-RPC implementations.
 //
-
-std::string
-createHTTPPost(
-    std::string const& strHost,
-    std::string const& strPath,
-    std::string const& strMsg,
-    std::unordered_map<std::string, std::string> const& mapRequestHeaders)
-{
-    std::ostringstream s;
-
-    // CHECKME this uses a different version than the replies below use. Is
-    //         this by design or an accident or should it be using
-    //         BuildInfo::getFullVersionString () as well?
-
-    s << "POST " << (strPath.empty() ? "/" : strPath) << " HTTP/1.0\r\n"
-      << "User-Agent: " << systemName() << "-json-rpc/v1\r\n"
-      << "Host: " << strHost << "\r\n"
-      << "Content-Type: application/json\r\n"
-      << "Content-Length: " << strMsg.size() << "\r\n"
-      << "Accept: application/json\r\n";
-
-    for (auto const& [k, v] : mapRequestHeaders)
-        s << k << ": " << v << "\r\n";
-
-    s << "\r\n" << strMsg;
-
-    return s.str();
-}
 
 class RPCParser
 {
@@ -1550,11 +1520,9 @@ struct RPCCallImp
         (*jvOutput) = jvInput;
     }
 
-    static bool
+    static void
     onResponse(
         std::function<void(json::Value const& jvInput)> callbackFuncP,
-        boost::system::error_code const& ecResult,
-        int iStatus,
         std::string const& strData,
         beast::Journal j)
     {
@@ -1591,26 +1559,6 @@ struct RPCCallImp
 
             (callbackFuncP)(jvResult);
         }
-
-        return false;
-    }
-
-    // Build the request.
-    static void
-    onRequest(
-        std::string const& strMethod,
-        json::Value const& jvParams,
-        std::unordered_map<std::string, std::string> const& headers,
-        std::string const& strPath,
-        boost::asio::streambuf& sb,
-        std::string const& strHost,
-        beast::Journal j)
-    {
-        JLOG(j.debug()) << "requestRPC: strPath='" << strPath << "'";
-
-        std::ostream osRequest(&sb);
-        osRequest << createHTTPPost(
-            strHost, strPath, jsonrpcRequest(strMethod, jvParams, json::Value(1)), headers);
     }
 };
 
@@ -1856,39 +1804,50 @@ fromNetwork(
     headers["Authorization"] =
         std::string("Basic ") + base64Encode(strUsername + ":" + strPassword);
 
-    // Send request
-
-    // Number of bytes to try to receive if no
-    // Content-Length header received
+    // Number of bytes to try to receive if no Content-Length header received
     constexpr auto kRpcReplyMaxBytes = megabytes(256);
 
     using namespace std::chrono_literals;
     static constexpr auto kRpcWebhookTimeout = 30s;
 
-    HTTPClient::request(
-        bSSL,
-        ioContext,
-        strIp,
-        iPort,
-        std::bind(
-            &RPCCallImp::onRequest,
-            strMethod,
-            jvParams,
-            headers,
-            strPath,
-            std::placeholders::_1,
-            std::placeholders::_2,
-            j),
-        kRpcReplyMaxBytes,
-        kRpcWebhookTimeout,
-        std::bind(
-            &RPCCallImp::onResponse,
-            callbackFuncP,
-            std::placeholders::_1,
-            std::placeholders::_2,
-            std::placeholders::_3,
-            j),
-        j);
+    // Build the JSON-RPC request body
+    std::string body = jsonrpcRequest(strMethod, jvParams, json::Value(1));
+
+    // Build the URL; wrap bare IPv6 literals in brackets
+    std::string scheme = bSSL ? "https://" : "http://";
+    std::string host = strIp;
+    if (host.contains(':') && !host.starts_with('['))
+        host = "[" + host + "]";
+    std::string url =
+        scheme + host + ":" + std::to_string(iPort) + (strPath.empty() ? "/" : strPath);
+
+    HTTPRequestBuilder builder(url, ::rs::http_client::HTTPMethod::Post, kRpcWebhookTimeout);
+    builder.addHeader("Content-Type", "application/json")
+        .addHeader("Accept", "application/json")
+        .addHeader("User-Agent", systemName() + "-json-rpc/v1");
+
+    for (auto const& [name, value] : headers)
+        builder.addHeader(name, value);
+
+    builder.setBody(std::vector<uint8_t>(body.begin(), body.end()))
+        .setMaxResponseSize(kRpcReplyMaxBytes);
+
+    auto callbackFuncPCopy = callbackFuncP;
+    builder.asyncSubmit(
+        ioContext.get_executor(),
+        [callbackFuncPCopy, j](
+            std::expected<::rs::http_client::Response, HttpError> result) mutable {
+            std::string data;
+            if (result.has_value())
+            {
+                data = std::string(result->body.begin(), result->body.end());
+            }
+            else
+            {
+                JLOG(j.warn()) << "HTTP request failed: " << result.error().message;
+            }
+            RPCCallImp::onResponse(callbackFuncPCopy, data, j);
+        });
 }
 
 }  // namespace RPCCall

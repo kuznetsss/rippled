@@ -1,5 +1,6 @@
 #include <xrpld/app/main/Application.h>
 #include <xrpld/core/Config.h>
+#include <xrpl/net/HTTPClientRust.h>
 #include <xrpld/core/TimeKeeper.h>
 #include <xrpld/rpc/RPCCall.h>
 #include <xrpld/rpc/handlers/server_info/ServerDefinitions.h>
@@ -577,6 +578,16 @@ run(int argc, char** argv)
     // config file, quiet flag.
     config->setup(
         configFile, vm.contains("quiet"), vm.contains("silent"), vm.contains("standalone"));
+
+    // Shut down the Rust HTTP runtime on every exit path.  Declared before
+    // `app` so the application is destroyed before the runtime tears down.
+    struct HTTPClientShutdownGuard
+    {
+        ~HTTPClientShutdownGuard()
+        {
+            xrpl::shutdownHTTPClient();
+        }
+    } httpClientShutdownGuard;
 
     if (vm.contains("vacuum"))
     {

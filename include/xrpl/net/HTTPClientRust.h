@@ -5,6 +5,8 @@
 
 #include <rs_http_client_cxxbridge/ffi.h>
 
+#include <xrpl/beast/utility/Journal.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +19,26 @@
 #include <vector>
 
 namespace xrpl {
+
+// Initialise the Tokio runtime (numThreads worker threads) and the TLS
+// context.  AlreadyInitialized is treated as success so that test processes
+// that create many environments do not fail on subsequent calls.  Throws
+// std::runtime_error on any other error.
+void
+initHTTPClient(
+    std::size_t numThreads,
+    bool sslVerify,
+    std::string const& sslVerifyFile,
+    std::string const& sslVerifyDir,
+    beast::Journal j);
+
+// Tear down the Tokio runtime and TLS context.  Must not throw — called
+// from RAII destructors.  Errors are logged only.
+void
+shutdownHTTPClient(
+    std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
+
+
 
 // namespace detail {
 //

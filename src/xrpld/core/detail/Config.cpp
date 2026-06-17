@@ -10,7 +10,7 @@
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/config/BasicConfig.h>
 #include <xrpl/config/Constants.h>
-#include <xrpl/net/HTTPClient.h>
+#include <xrpl/net/HTTPClientRust.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/rdb/DBInit.h>
@@ -251,6 +251,7 @@ char const* const Config::kConfigFileName = "xrpld.cfg";
 char const* const Config::kConfigLegacyName = "rippled.cfg";
 char const* const Config::kDatabaseDirName = "db";
 char const* const Config::kValidatorsFileName = "validators.txt";
+static constexpr size_t kTokioRuntimeThreadsNumber = 2;
 
 [[nodiscard]] static std::string
 getEnvVar(char const* name)
@@ -406,7 +407,8 @@ Config::setup(std::string const& strConf, bool bQuiet, bool bSilent, bool bStand
         legacy(Sections::kDatabasePath, boost::filesystem::absolute(dataDir).string());
     }
 
-    HTTPClient::initializeSSLContext(this->sslVerifyDir, this->sslVerifyFile, this->sslVerify, j_);
+    initHTTPClient(
+        kTokioRuntimeThreadsNumber, this->sslVerify, this->sslVerifyFile, this->sslVerifyDir, j_);
 
     if (runStandalone_)
         ledgerHistory = 0;
