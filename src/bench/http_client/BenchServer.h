@@ -123,6 +123,12 @@ private:
                     break;
                 continue;
             }
+            // Disable Nagle: otherwise the server can hold a small trailing
+            // segment (response tail / TLS close_notify) awaiting the client's
+            // delayed ACK, adding a ~40ms stall per fresh connection — which
+            // crushes the connection-per-request (no-reuse) HTTPS throughput.
+            boost::system::error_code noDelayEc;
+            socket.set_option(tcp::no_delay(true), noDelayEc);
             if (tls_)
                 net::co_spawn(ioc_, sessionTls(std::move(socket)), net::detached);
             else

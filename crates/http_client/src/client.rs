@@ -39,7 +39,10 @@ fn build_and_store(config: TlsConfig) -> Result<()> {
 fn build_client(config: &TlsConfig) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         // Preserve legacy C++ client behaviour: no redirect following.
-        .redirect(reqwest::redirect::Policy::none());
+        .redirect(reqwest::redirect::Policy::none())
+        // Disable Nagle so a small handshake/close segment is never held
+        // awaiting the peer's delayed ACK (~40ms stalls on fresh connections).
+        .tcp_nodelay(true);
 
     if config.disable_connection_reuse {
         // No idle connection is retained, so each request opens a fresh
