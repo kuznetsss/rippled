@@ -147,6 +147,25 @@ writeReport(
     out << "# HTTP Client Benchmark Report\n\n";
     out << "Generated: " << timestamp << "\n\n";
 
+    // What this models
+    out << "## What this models\n\n";
+    out << "This benchmark models `ValidatorSite`'s ~5-minute-cadence fresh-connection HTTPS "
+           "fetches (and one-shot CLI RPC via `RPCCall`). In production, the connection pool "
+           "is effectively never warm: keep-alive idle connections time out in ~60–120 s but "
+           "fetches are 5 minutes apart. Real concurrency is ~1 (a handful of staggered sites "
+           "at most). Therefore:\n\n";
+    out << "- **Rust(forced-close)** is the realistic primary comparison vs Legacy — both pay "
+           "a fresh TCP connect + TLS handshake per request, matching production.\n";
+    out << "- **Rust(reuse-on)** is an upper-bound ceiling that only applies if requests are "
+           "frequent or bursty enough to reuse a warm connection, which does not happen at the "
+           "5-minute cadence. It is kept for reference but is NOT the headline result.\n";
+    out << "- Metrics emphasize **per-request latency, CPU/req, and RSS** over throughput, "
+           "because the client is a low-rate background fetcher — req/s is not meaningful for "
+           "this workload.\n";
+    out << "- **HTTPS is the primary transport** (validator lists are always HTTPS); "
+           "HTTP is a secondary baseline.\n";
+    out << "\n";
+
     // Setup section
     out << "## Setup\n\n";
     out << "| Parameter | Value |\n";
@@ -174,25 +193,34 @@ writeReport(
     // Cells explanation
     out << "## Cells\n\n";
     out << "- **Legacy** — `xrpl::HTTPClient::get` with `Connection: close`; "
-           "always pays a fresh TCP connection (and TLS handshake) per request.\n";
-    out << "- **Rust(reuse-on)** (Cell A) — `reqwest` with default connection pooling / keep-alive. "
-           "After the first request the TCP connection (and TLS session) is reused.\n";
+           "always pays a fresh TCP connection (and TLS handshake) per request. "
+           "This is how the legacy client behaves in production.\n";
     out << "- **Rust(forced-close)** (Cell B) — `reqwest` with `disable_connection_reuse=true` "
            "*and* a `Connection: close` request header, so the server initiates each close — "
-           "same fresh-connection semantics as Legacy, isolating Rust's per-request overhead from "
-           "pooling gains. (The close header also keeps TIME_WAIT on the server's fixed port "
-           "instead of exhausting client ephemeral ports on loopback.)\n";
+           "same fresh-connection semantics as Legacy. **This is the PRIMARY realistic comparison**: "
+           "both clients pay a fresh TCP connect + TLS handshake, matching the 5-minute-cadence "
+           "production workload. The close header also keeps TIME_WAIT on the server's fixed port "
+           "instead of exhausting client ephemeral ports on loopback.\n";
+    out << "- **Rust(reuse-on)** (Cell A) — `reqwest` with default connection pooling / keep-alive. "
+           "After the first request the TCP connection (and TLS session) is reused. "
+           "**This is a bursty-only upper-bound ceiling** that does NOT reflect production's "
+           "5-minute fetch cadence (the pool expires before the next fetch). Keep for reference only.\n";
     out << "\n";
 
     // Per-transport tables
     for (auto const& transport : transports)
     {
-        out << "## Results — " << transport << "\n\n";
+        out << "## Results — " << transport;
+        if (transport == "https")
+            out << " (primary transport)";
+        out << "\n\n";
 
+        // Headline columns: latency first, then CPU/req, RSS, Errors, throughput last.
         std::vector<std::string> cols = {
-            "Concurrency", "Client", "Throughput (req/s)",
-            "p50 (ms)", "p90 (ms)", "p99 (ms)", "max (ms)",
-            "CPU ms/req", "Peak RSS (MB)", "Errors", "Notes"
+            "Concurrency", "Client",
+            "p50 (ms)", "p90 (ms)", "p99 (ms)", "max (ms)", "mean (ms)",
+            "CPU ms/req", "Peak RSS (MB)", "Errors",
+            "Throughput (req/s)", "Notes"
         };
         out << tableHeader(cols) << "\n";
 
@@ -203,27 +231,45 @@ writeReport(
 
             auto const& r = rec.result;
             std::string notes;
-            if (!r.firstError.empty())
+            if (rec.label == "Rust(reuse-on)")
+                notes = "bursty ceiling only";
+            else if (!r.firstError.empty())
                 notes = r.firstError;
+
+            // For fresh-connection cells, display throughput as concurrency/mean-latency
+            // (Little's Law over the bounded sample) rather than the raw measured req/s, which
+            // is not a sustainable-capacity figure at low concurrency.
+            double displayedRps = r.throughputRps;
+            bool const isFreshConn = (rec.label != "Rust(reuse-on)");
+            if (isFreshConn && r.meanMs > 0.0)
+                displayedRps = static_cast<double>(rec.concurrency) / (r.meanMs / 1000.0);
 
             out << tableRow({
                 std::to_string(rec.concurrency),
                 rec.label,
-                fmtRps(r.throughputRps),
                 fmtMs(r.p50Ms),
                 fmtMs(r.p90Ms),
                 fmtMs(r.p99Ms),
                 fmtMs(r.maxMs),
+                fmtMs(r.meanMs),
                 fmtSig(cpuMsPerReq(r), 3),
                 fmtMB(r.peakRssBytes),
                 std::to_string(r.errors),
+                fmtRps(displayedRps),
                 notes
             }) << "\n";
         }
         out << "\n";
+        out << "> Throughput for fresh-connection cells (Legacy, Rust(forced-close)) is derived "
+               "as `concurrency / mean-latency` (Little's Law) over the bounded sample — it "
+               "reflects per-request cost, not sustained capacity. Only Rust(reuse-on) gives a "
+               "clean sustained-throughput figure.\n";
+        out << "\n";
 
-        // Speedup lines
-        out << "### Speedup vs Legacy (" << transport << ")\n\n";
+        // Latency and CPU ratios (replaces the old "Speedup vs Legacy" throughput ratios)
+        out << "### Improvement vs Legacy (" << transport << ")\n\n";
+        out << "> Ratio > 1 means Rust is faster/cheaper. "
+               "Rust(forced-close) is the realistic primary; Rust(reuse-on) is the bursty ceiling.\n\n";
 
         // Collect unique concurrency levels for this transport.
         std::vector<unsigned> concLevels;
@@ -243,26 +289,53 @@ writeReport(
             }
         }
 
+        std::vector<std::string> ratioCols = {
+            "Concurrency",
+            "Legacy/Rust-B p50 latency", "Legacy/Rust-B CPU/req",
+            "Legacy/Rust-A p50 latency", "Legacy/Rust-A CPU/req"
+        };
+        out << tableHeader(ratioCols) << "\n";
+
         for (unsigned conc : concLevels)
         {
-            double legacyRps = 0.0, rustARps = 0.0, rustBRps = 0.0;
+            double legacyP50 = 0.0, legacyCpu = 0.0;
+            double rustAP50 = 0.0, rustACpu = 0.0;
+            double rustBP50 = 0.0, rustBCpu = 0.0;
             for (auto const& rec : records)
             {
                 if (rec.transport != transport || rec.concurrency != conc)
                     continue;
                 if (rec.label == "Legacy")
-                    legacyRps = rec.result.throughputRps;
+                {
+                    legacyP50 = rec.result.p50Ms;
+                    legacyCpu = cpuMsPerReq(rec.result);
+                }
                 else if (rec.label == "Rust(reuse-on)")
-                    rustARps = rec.result.throughputRps;
+                {
+                    rustAP50 = rec.result.p50Ms;
+                    rustACpu = cpuMsPerReq(rec.result);
+                }
                 else if (rec.label == "Rust(forced-close)")
-                    rustBRps = rec.result.throughputRps;
+                {
+                    rustBP50 = rec.result.p50Ms;
+                    rustBCpu = cpuMsPerReq(rec.result);
+                }
             }
-            if (legacyRps > 0.0)
+
+            auto fmtRatio = [](double num, double den) -> std::string
             {
-                out << "- c=" << conc
-                    << ": Rust-A / Legacy = " << fmtSig(rustARps / legacyRps, 3) << "x"
-                    << ";  Rust-B / Legacy = " << fmtSig(rustBRps / legacyRps, 3) << "x\n";
-            }
+                if (den <= 0.0)
+                    return "n/a";
+                return fmtSig(num / den, 3) + "x";
+            };
+
+            out << tableRow({
+                std::to_string(conc),
+                fmtRatio(legacyP50, rustBP50),
+                fmtRatio(legacyCpu, rustBCpu),
+                fmtRatio(legacyP50, rustAP50),
+                fmtRatio(legacyCpu, rustACpu)
+            }) << "\n";
         }
         out << "\n";
     }
@@ -280,13 +353,12 @@ writeReport(
            "and excluded from all statistics.\n";
     out << "- **Fresh server per run**: every run spins up its own BenchServer on a new "
            "ephemeral port, so each gets an isolated TCP 4-tuple space + fresh server threads "
-           "and a prior run's TIME_WAIT sockets cannot starve it. A single no-reuse run can "
-           "still exhaust its own port if it churns more connections than the ephemeral range "
-           "holds within one TIME_WAIT window (~60s on Linux); if that happens, the run shows "
-           "timeout errors below.\n";
-    out << "- **Driver watchdog**: each request has a backstop deadline; a request that "
-           "doesn't complete in time is recorded as a timeout error and the loop proceeds "
-           "(rather than hanging). Watchdog timeouts appear in the Errors column.\n";
+           "and a prior run's TIME_WAIT sockets cannot starve it.\n";
+    out << "- **Legacy-only driver watchdog**: the legacy client has no working per-request "
+           "timeout in its success path (its deadline timer is only armed on an exception branch), "
+           "so a backstop timer is kept on the legacy path only. reqwest has a working per-request "
+           "timeout and the completion always fires, so no watchdog is needed on the Rust path. "
+           "Watchdog timeouts appear in the Errors column.\n";
     out << "- **Symmetric thread split**: each client runs N runtime threads + "
         << controlThreads << " control thread(s). Legacy = " << legacyThreads
         << " network io_context + " << controlThreads << " control = "
@@ -295,8 +367,10 @@ writeReport(
         << ". The runtime does network I/O; the control io_context fires requests and "
            "records stats, with completions hopped runtime->control in BOTH paths. "
            "Adjust `--legacy-threads`/`--tokio-threads`/`--control-threads` to taste.\n";
-    out << "- **Measurements are wall-clock**: throughput is (ok+errors)/wallSeconds over "
-           "the measured window; CPU ms/req is (user+sys CPU) / total requests.\n";
+    out << "- **Throughput note**: for fresh-connection cells, displayed throughput is "
+           "`concurrency / mean-latency` (Little's Law), not sustained capacity. At the "
+           "production cadence (~1 req per 5 min per site), throughput is irrelevant; "
+           "per-request latency and CPU cost are what matter.\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -311,15 +385,23 @@ main(int argc, char* argv[])
     // clang-format off
     desc.add_options()
         ("help,h",                                                      "show help")
-        ("requests",         po::value<unsigned>()->default_value(10000),
+        ("requests",         po::value<unsigned>()->default_value(2000),
+                             // Kept modest: fresh-connection runs must not approach ephemeral-port
+                             // exhaustion (~64k ports, TIME_WAIT ~60s). 2000 requests at c=8 is
+                             // well within the safe zone on loopback.
                              "measured requests per run")
-        ("warmup",           po::value<unsigned>()->default_value(1000),
+        ("warmup",           po::value<unsigned>()->default_value(200),
                              "unmeasured warmup requests per run")
-        ("concurrency",      po::value<std::string>()->default_value("8,64"),
+        ("concurrency",      po::value<std::string>()->default_value("1,8"),
+                             // 1 models a single periodic fetch (ValidatorSite's ~5-min cadence);
+                             // 8 models the worst case of several sites refreshing near-simultaneously.
+                             // High concurrency (32/64) models a workload this client never has.
                              "comma-separated concurrency levels to sweep")
         ("response-size",    po::value<std::size_t>()->default_value(1024),
                              "server response body size in bytes")
         ("transport",        po::value<std::string>()->default_value("both"),
+                             // https is the primary transport (validator lists are always HTTPS);
+                             // http is kept as a secondary baseline.
                              "http | https | both")
         ("server-threads",   po::value<unsigned>()->default_value(8),
                              "server io_context thread pool size")
@@ -393,11 +475,13 @@ main(int argc, char* argv[])
         return 1;
     }
 
+    // https is listed first: it is the primary transport (ValidatorSite always
+    // uses HTTPS); http follows as a secondary baseline.
     std::vector<std::string> activeTransports;
-    if (doHttp)
-        activeTransports.push_back("http");
     if (doHttps)
         activeTransports.push_back("https");
+    if (doHttp)
+        activeTransports.push_back("http");
 
     std::string const timestamp = nowIso();
 

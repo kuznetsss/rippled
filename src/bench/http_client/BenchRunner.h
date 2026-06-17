@@ -154,11 +154,13 @@ runLegacyPhase(
         ? std::chrono::seconds(1)
         : std::chrono::ceil<std::chrono::seconds>(cfg.timeout);
 
-    // Driver watchdog: a per-request backstop set just beyond the client's own
-    // timeout. The legacy client has no working per-request timeout in its
-    // success path (its deadline timer is only armed on an exception branch), so
-    // without this a single stalled connection wedges the whole phase. When it
-    // fires, the request is recorded as a timeout error and the loop proceeds.
+    // Legacy-only watchdog: the legacy client has no working per-request timeout
+    // in its success path (its deadline timer is only armed on an exception
+    // branch), so a single stalled connection would wedge the whole phase without
+    // this backstop. When it fires, the request is recorded as a timeout error
+    // and the closed loop proceeds. The Rust path does NOT need this backstop
+    // because reqwest has a working per-request timeout and the completion always
+    // fires; see runRustPhase for the asymmetry comment there.
     auto const watchdog = cfg.timeout + std::chrono::seconds(5);
 
     std::function<void()> fireOne;
@@ -289,6 +291,10 @@ runLegacyPhase(
 
 // Run one closed-loop phase of `count` requests at `concurrency` on a fresh
 // io_context, using the Rust HTTPRequestBuilder/asyncSubmit.
+//
+// No driver watchdog here: reqwest has a working per-request timeout, so the
+// completion always fires (either with a result or with a Timeout error). This
+// asymmetry vs runLegacyPhase is intentional — see the watchdog comment there.
 inline void
 runRustPhase(
     RunConfig const& cfg,
@@ -308,11 +314,6 @@ runRustPhase(
     std::atomic<unsigned> launched{0};
     std::atomic<unsigned> completed{0};
     std::mutex mu;
-
-    // Backstop for a stalled request (see runLegacyPhase). reqwest has its own
-    // timeout, so this normally only catches true hangs; the margin lets the
-    // client's own timeout fire first and report a proper Timeout.
-    auto const watchdog = cfg.timeout + std::chrono::seconds(5);
 
     std::function<void()> fireOne;
 
@@ -359,21 +360,6 @@ runRustPhase(
         }
 
         auto const start = std::chrono::steady_clock::now();
-        auto settled = std::make_shared<std::atomic<bool>>(false);
-        auto timer = std::make_shared<boost::asio::steady_timer>(ioc);
-
-        timer->expires_after(watchdog);
-        timer->async_wait(
-            [&recordResult, settled, start](boost::system::error_code const& ec)
-            {
-                if (ec)
-                    return;
-                if (settled->exchange(true))
-                    return;
-                double const ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - start).count();
-                recordResult(false, "request timed out (driver watchdog)", ms);
-            });
 
         // A fresh named builder is required for each request: the setters
         // return HTTPRequestBuilder& (not a new builder), and asyncSubmit
@@ -385,14 +371,10 @@ runRustPhase(
             builder.addHeader("connection", "close");
         builder.asyncSubmit(
             ioc.get_executor(),
-            [&recordResult, settled, timer, start](
+            [&recordResult, start](
                 std::expected<::rs::http_client::Response, xrpl::HttpError> exp)
             {
                 // Posted onto the control io_context by HTTPCompletionImpl.
-                if (settled->exchange(true))
-                    return;  // watchdog already settled this request
-                timer->cancel();
-
                 double const ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - start).count();
                 bool const ok = exp.has_value() && exp->status == 200;
