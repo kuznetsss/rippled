@@ -1,11 +1,24 @@
 use crate::error::{Error, Result};
 use std::{
-    sync::{OnceLock, RwLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::Duration,
 };
 
 pub(crate) struct Runtime {
-    inner: RwLock<Option<tokio::runtime::Runtime>>,
+    // Cached handle: spawning through it is lock-free, so the per-request hot
+    // path touches no shared lock.
+    handle: tokio::runtime::Handle,
+    // Keeps the runtime alive; consumed by `shutdown`. Behind a Mutex only so
+    // shutdown can `take()` it — never touched on the request path.
+    inner: Mutex<Option<tokio::runtime::Runtime>>,
+    // Cleared once shutdown starts so `spawn` reports `ShutDown` instead of
+    // spawning onto a dying runtime. A read-only load on the hot path: the
+    // cache line stays Shared across cores, unlike a RwLock's reader count
+    // which every reader writes (cache-line ping-pong under concurrency).
+    running: AtomicBool,
 }
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -24,9 +37,12 @@ impl Runtime {
             .enable_all()
             .build()
             .map_err(Error::RuntimeBuild)?;
+        let handle = rt.handle().clone();
         RUNTIME
             .set(Runtime {
-                inner: Some(rt).into(),
+                handle,
+                inner: Mutex::new(Some(rt)),
+                running: AtomicBool::new(true),
             })
             .map_err(|_| Error::AlreadyInitialized)
     }
@@ -35,9 +51,11 @@ impl Runtime {
     /// already been taken).
     pub(crate) fn shutdown(timeout: Duration) -> Result<()> {
         let runtime = RUNTIME.get().ok_or(Error::NotInitialized)?;
+        // Stop accepting new work before tearing the runtime down.
+        runtime.running.store(false, Ordering::Release);
         let inner = runtime
             .inner
-            .write()
+            .lock()
             .map_err(|_| Error::LockPoisoned)?
             .take();
         if let Some(inner) = inner {
@@ -48,15 +66,20 @@ impl Runtime {
 
     /// Returns `Err` if the runtime is not initialized or has been shut down;
     /// the caller propagates failures via `CompletionGuard` (Canceled on drop).
+    ///
+    /// The `running`/`spawn` pair is not atomic against a concurrent
+    /// `shutdown`, but shutdown is process teardown — it does not race
+    /// steady-state request load — so the cheaper lock-free path is sound here.
     pub(crate) fn spawn<F, O>(f: F) -> Result<()>
     where
         F: Future<Output = O> + Send + 'static,
         O: Send + 'static,
     {
         let runtime = RUNTIME.get().ok_or(Error::NotInitialized)?;
-        let guard = runtime.inner.read().map_err(|_| Error::LockPoisoned)?;
-        let tokio_rt = guard.as_ref().ok_or(Error::ShutDown)?;
-        tokio_rt.spawn(f);
+        if !runtime.running.load(Ordering::Acquire) {
+            return Err(Error::ShutDown);
+        }
+        runtime.handle.spawn(f);
         Ok(())
     }
 }

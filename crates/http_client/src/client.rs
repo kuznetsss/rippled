@@ -1,38 +1,30 @@
 use crate::error::{Error, Result};
 use crate::ffi::{Status, TlsConfig};
+use arc_swap::ArcSwapOption;
 use reqwest::Certificate;
-use std::{
-    fs,
-    sync::{OnceLock, RwLock},
-};
+use std::{fs, sync::Arc};
 
-// TODO: maybe we could store client in a better way?
-static CLIENT: OnceLock<RwLock<Option<reqwest::Client>>> = OnceLock::new();
-
-fn slot() -> &'static RwLock<Option<reqwest::Client>> {
-    CLIENT.get_or_init(|| RwLock::new(None))
-}
+// Read-mostly: written only by init/reset (startup/teardown), read once per
+// request. `ArcSwapOption` makes the per-request read lock-free, removing the
+// RwLock reader-count cache-line contention across the Tokio worker pool.
+static CLIENT: ArcSwapOption<reqwest::Client> = ArcSwapOption::const_empty();
 
 pub(crate) fn init_tls_context(config: TlsConfig) -> Status {
     build_and_store(config).into()
 }
 
 pub(crate) fn reset_tls_context() -> Status {
-    let result: Result<()> = (|| {
-        *slot().write().map_err(|_| Error::LockPoisoned)? = None;
-        Ok(())
-    })();
-    result.into()
+    CLIENT.store(None);
+    Ok::<(), Error>(()).into()
 }
 
-pub(crate) fn get() -> Result<reqwest::Client> {
-    let guard = slot().read().map_err(|_| Error::LockPoisoned)?;
-    guard.as_ref().cloned().ok_or(Error::NotInitialized)
+pub(crate) fn get() -> Result<Arc<reqwest::Client>> {
+    CLIENT.load_full().ok_or(Error::NotInitialized)
 }
 
 fn build_and_store(config: TlsConfig) -> Result<()> {
     let client = build_client(&config)?;
-    *slot().write().map_err(|_| Error::LockPoisoned)? = Some(client);
+    CLIENT.store(Some(Arc::new(client)));
     Ok(())
 }
 

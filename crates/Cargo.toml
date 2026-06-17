@@ -4,6 +4,7 @@ resolver = "3"
 
 [workspace.dependencies]
 anyhow = "1.0.102"
+arc-swap = "1.9.1"
 cxx = { version = "1.0.194", features = ["c++20"] }
 reqwest = "0.13.4"
 serial_test = "3.5.0"
