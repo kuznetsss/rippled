@@ -278,6 +278,15 @@ writeReport(
            "a fresh connection per request regardless of transport.\n";
     out << "- **Warmup excluded**: the first " << warmup << " requests are unmeasured "
            "and excluded from all statistics.\n";
+    out << "- **Fresh server per run**: every run spins up its own BenchServer on a new "
+           "ephemeral port, so each gets an isolated TCP 4-tuple space + fresh server threads "
+           "and a prior run's TIME_WAIT sockets cannot starve it. A single no-reuse run can "
+           "still exhaust its own port if it churns more connections than the ephemeral range "
+           "holds within one TIME_WAIT window (~60s on Linux); if that happens, the run shows "
+           "timeout errors below.\n";
+    out << "- **Driver watchdog**: each request has a backstop deadline; a request that "
+           "doesn't complete in time is recorded as a timeout error and the loop proceeds "
+           "(rather than hanging). Watchdog timeouts appear in the Errors column.\n";
     out << "- **Symmetric thread split**: each client runs N runtime threads + "
         << controlThreads << " control thread(s). Legacy = " << legacyThreads
         << " network io_context + " << controlThreads << " control = "
@@ -392,11 +401,9 @@ main(int argc, char* argv[])
 
     std::string const timestamp = nowIso();
 
-    // --- Start server ---
-    bench::BenchServer server(serverThreads, responseSize, enableTls);
-    server.start();
-    unsigned short const httpPort  = server.httpPort();
-    unsigned short const httpsPort = server.httpsPort();
+    // A fresh BenchServer is created per run inside the loop below (see "test
+    // case" scoping there), so each run gets its own ephemeral port + server
+    // threads. `enableTls` only gates whether https runs happen.
 
     // --- Materialize embedded CA cert to a temp file (if TLS verify requested) ---
     std::filesystem::path caTempPath;
@@ -421,7 +428,6 @@ main(int argc, char* argv[])
         {
             std::cerr << "Error: init_tokio_runtime failed: "
                       << static_cast<std::string>(status.message) << "\n";
-            server.stop();
             return 1;
         }
     }
@@ -483,17 +489,21 @@ main(int argc, char* argv[])
     for (auto const& transport : activeTransports)
     {
         bool const isTls = (transport == "https");
-        unsigned short const port = isTls ? httpsPort : httpPort;
 
         for (unsigned conc : concLevels)
         {
+            // Each run ("test case") spins up its own BenchServer on a fresh
+            // ephemeral port, so it gets an isolated TCP 4-tuple space and fresh
+            // server threads — nothing carries over from the previous run.
+
             // --- Legacy ---
             {
+                bench::BenchServer server(serverThreads, responseSize, isTls);
                 bench::RunConfig cfg;
                 cfg.client           = bench::ClientKind::Legacy;
                 cfg.tls              = isTls;
                 cfg.host             = "127.0.0.1";
-                cfg.port             = port;
+                cfg.port             = server.port();
                 cfg.path             = "/bench";
                 cfg.maxResponseBytes = maxRespBytes;
                 cfg.totalRequests    = requests;
@@ -508,11 +518,12 @@ main(int argc, char* argv[])
             // --- Rust Cell A: reuse on ---
             {
                 initRustTls(/*disableReuse=*/false);
+                bench::BenchServer server(serverThreads, responseSize, isTls);
                 bench::RunConfig cfg;
                 cfg.client           = bench::ClientKind::Rust;
                 cfg.tls              = isTls;
                 cfg.host             = "127.0.0.1";
-                cfg.port             = port;
+                cfg.port             = server.port();
                 cfg.path             = "/bench";
                 cfg.maxResponseBytes = maxRespBytes;
                 cfg.totalRequests    = requests;
@@ -527,11 +538,12 @@ main(int argc, char* argv[])
             // --- Rust Cell B: forced close ---
             {
                 initRustTls(/*disableReuse=*/true);
+                bench::BenchServer server(serverThreads, responseSize, isTls);
                 bench::RunConfig cfg;
                 cfg.client           = bench::ClientKind::Rust;
                 cfg.tls              = isTls;
                 cfg.host             = "127.0.0.1";
-                cfg.port             = port;
+                cfg.port             = server.port();
                 cfg.path             = "/bench";
                 cfg.maxResponseBytes = maxRespBytes;
                 cfg.totalRequests    = requests;
@@ -547,7 +559,6 @@ main(int argc, char* argv[])
     }
 
     // --- Teardown ---
-    server.stop();
     ::rs::http_client::shutdown_tokio_runtime(2000);
     xrpl::HTTPClient::cleanupSSLContext();
     if (!caTempPath.empty())

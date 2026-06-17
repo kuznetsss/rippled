@@ -8,6 +8,7 @@
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/steady_timer.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -153,9 +154,50 @@ runLegacyPhase(
         ? std::chrono::seconds(1)
         : std::chrono::ceil<std::chrono::seconds>(cfg.timeout);
 
-    // Forward-declare so the lambda can reference itself. Always invoked on a
-    // control thread.
+    // Driver watchdog: a per-request backstop set just beyond the client's own
+    // timeout. The legacy client has no working per-request timeout in its
+    // success path (its deadline timer is only armed on an exception branch), so
+    // without this a single stalled connection wedges the whole phase. When it
+    // fires, the request is recorded as a timeout error and the loop proceeds.
+    auto const watchdog = cfg.timeout + std::chrono::seconds(5);
+
     std::function<void()> fireOne;
+
+    auto stopAll = [&]()
+    {
+        netGuard.reset();
+        controlGuard.reset();
+        netIoc.stop();
+        controlIoc.stop();
+    };
+
+    // Records one settled request and advances the closed loop. Runs on a
+    // control thread.
+    auto recordResult = [&](bool ok, std::string msg, double ms)
+    {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (ok)
+            {
+                ++okOut;
+            }
+            else
+            {
+                ++errorsOut;
+                if (firstErrorOut.empty())
+                    firstErrorOut = std::move(msg);
+            }
+            if (latenciesOut)
+                latenciesOut->push_back(ms);
+        }
+
+        unsigned const done = completed.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (launched.load(std::memory_order_relaxed) < count)
+            fireOne();
+        if (done == count)
+            stopAll();
+    };
+
     fireOne = [&]()
     {
         unsigned const slot = launched.fetch_add(1, std::memory_order_relaxed);
@@ -167,6 +209,22 @@ runLegacyPhase(
         }
 
         auto const start = std::chrono::steady_clock::now();
+        // settle-once: whichever of {real completion, watchdog} fires first wins.
+        auto settled = std::make_shared<std::atomic<bool>>(false);
+        auto timer = std::make_shared<boost::asio::steady_timer>(controlIoc);
+
+        timer->expires_after(watchdog);
+        timer->async_wait(
+            [&recordResult, settled, start](boost::system::error_code const& ec)
+            {
+                if (ec)  // cancelled by a real completion
+                    return;
+                if (settled->exchange(true))
+                    return;
+                double const ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+                recordResult(false, "request timed out (driver watchdog)", ms);
+            });
 
         xrpl::HTTPClient::get(
             cfg.tls,
@@ -176,13 +234,13 @@ runLegacyPhase(
             cfg.path,
             cfg.maxResponseBytes,
             timeoutSec,
-            [&, start](
+            [&recordResult, &controlIoc, settled, timer, start](
                 boost::system::error_code const& ec,
                 int status,
                 std::string const& /*data*/) -> bool
             {
-                // Runs on a network thread. Measure here, then hop everything
-                // else onto the control io_context.
+                // Runs on a network thread. Measure here, then hop the settle
+                // onto the control io_context.
                 double const ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - start).count();
                 bool const ok = !ec && status == 200;
@@ -192,37 +250,12 @@ runLegacyPhase(
 
                 boost::asio::post(
                     controlIoc,
-                    [&, ms, ok, msg = std::move(msg)]() mutable
+                    [&recordResult, settled, timer, ok, msg = std::move(msg), ms]() mutable
                     {
-                        {
-                            std::lock_guard<std::mutex> lk(mu);
-                            if (ok)
-                            {
-                                ++okOut;
-                            }
-                            else
-                            {
-                                ++errorsOut;
-                                if (firstErrorOut.empty())
-                                    firstErrorOut = std::move(msg);
-                            }
-                            if (latenciesOut)
-                                latenciesOut->push_back(ms);
-                        }
-
-                        unsigned const done =
-                            completed.fetch_add(1, std::memory_order_acq_rel) + 1;
-
-                        if (launched.load(std::memory_order_relaxed) < count)
-                            fireOne();
-
-                        if (done == count)
-                        {
-                            netGuard.reset();
-                            controlGuard.reset();
-                            netIoc.stop();
-                            controlIoc.stop();
-                        }
+                        if (settled->exchange(true))
+                            return;  // watchdog already settled this request
+                        timer->cancel();
+                        recordResult(ok, std::move(msg), ms);
                     });
 
                 return false;  // single-site, no retry
@@ -266,6 +299,7 @@ runRustPhase(
     std::string& firstErrorOut)
 {
     boost::asio::io_context ioc;
+    auto controlGuard = boost::asio::make_work_guard(ioc);
 
     std::string const scheme = cfg.tls ? "https" : "http";
     std::string const url =
@@ -275,7 +309,46 @@ runRustPhase(
     std::atomic<unsigned> completed{0};
     std::mutex mu;
 
+    // Backstop for a stalled request (see runLegacyPhase). reqwest has its own
+    // timeout, so this normally only catches true hangs; the margin lets the
+    // client's own timeout fire first and report a proper Timeout.
+    auto const watchdog = cfg.timeout + std::chrono::seconds(5);
+
     std::function<void()> fireOne;
+
+    auto stopAll = [&]()
+    {
+        controlGuard.reset();
+        ioc.stop();
+    };
+
+    // Records one settled request and advances the closed loop. Runs on the
+    // control io_context.
+    auto recordResult = [&](bool ok, std::string msg, double ms)
+    {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            if (ok)
+            {
+                ++okOut;
+            }
+            else
+            {
+                ++errorsOut;
+                if (firstErrorOut.empty())
+                    firstErrorOut = std::move(msg);
+            }
+            if (latenciesOut)
+                latenciesOut->push_back(ms);
+        }
+
+        unsigned const done = completed.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (launched.load(std::memory_order_relaxed) < count)
+            fireOne();
+        if (done == count)
+            stopAll();
+    };
+
     fireOne = [&]()
     {
         unsigned const slot = launched.fetch_add(1, std::memory_order_relaxed);
@@ -286,6 +359,21 @@ runRustPhase(
         }
 
         auto const start = std::chrono::steady_clock::now();
+        auto settled = std::make_shared<std::atomic<bool>>(false);
+        auto timer = std::make_shared<boost::asio::steady_timer>(ioc);
+
+        timer->expires_after(watchdog);
+        timer->async_wait(
+            [&recordResult, settled, start](boost::system::error_code const& ec)
+            {
+                if (ec)
+                    return;
+                if (settled->exchange(true))
+                    return;
+                double const ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+                recordResult(false, "request timed out (driver watchdog)", ms);
+            });
 
         // A fresh named builder is required for each request: the setters
         // return HTTPRequestBuilder& (not a new builder), and asyncSubmit
@@ -297,39 +385,22 @@ runRustPhase(
             builder.addHeader("connection", "close");
         builder.asyncSubmit(
             ioc.get_executor(),
-            [&, start](std::expected<::rs::http_client::Response, xrpl::HttpError> exp)
+            [&recordResult, settled, timer, start](
+                std::expected<::rs::http_client::Response, xrpl::HttpError> exp)
             {
+                // Posted onto the control io_context by HTTPCompletionImpl.
+                if (settled->exchange(true))
+                    return;  // watchdog already settled this request
+                timer->cancel();
+
                 double const ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - start).count();
-
-                {
-                    std::lock_guard<std::mutex> lk(mu);
-                    if (exp.has_value() && exp->status == 200)
-                    {
-                        ++okOut;
-                    }
-                    else
-                    {
-                        ++errorsOut;
-                        if (firstErrorOut.empty())
-                        {
-                            if (!exp.has_value())
-                                firstErrorOut = exp.error().message;
-                            else
-                                firstErrorOut = "status " + std::to_string(exp->status);
-                        }
-                    }
-                    if (latenciesOut)
-                        latenciesOut->push_back(ms);
-                }
-
-                unsigned const done = completed.fetch_add(1, std::memory_order_acq_rel) + 1;
-
-                if (launched.load(std::memory_order_relaxed) < count)
-                    fireOne();
-
-                if (done == count)
-                    ioc.stop();
+                bool const ok = exp.has_value() && exp->status == 200;
+                std::string msg;
+                if (!ok)
+                    msg = exp.has_value() ? ("status " + std::to_string(exp->status))
+                                          : std::string(exp.error().message);
+                recordResult(ok, std::move(msg), ms);
             });
     };
 

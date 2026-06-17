@@ -34,24 +34,35 @@ using tcp = boost::asio::ip::tcp;
 // sends `Connection: close`). The whole thing — including its TLS certificate —
 // is self-contained: no external files, no runtime cert generation.
 //
-// The server runs on its own io_context thread pool so it is never the
-// bottleneck, and so its work is clearly separated from the client driver.
+// One instance is created per benchmark run (per "test case"): it binds a fresh
+// ephemeral port in the constructor, starts serving immediately on its own
+// io_context thread pool, exposes that port via port(), and shuts everything
+// down in the destructor. A fresh server per run means a fresh TCP 4-tuple
+// space and fresh server threads, so nothing carries over between runs.
 class BenchServer
 {
 public:
-    BenchServer(unsigned serverThreads, std::size_t responseSize, bool enableTls)
+    BenchServer(unsigned serverThreads, std::size_t responseSize, bool tls)
         : sslCtx_(ssl::context::tls_server)
-        , httpAcceptor_(ioc_)
+        , acceptor_(ioc_)
+        , tls_(tls)
         , body_(responseSize, 'x')
-        , threads_(serverThreads ? serverThreads : 1)
     {
-        openAcceptor(httpAcceptor_);
-        if (enableTls)
-        {
+        unsigned const threads = serverThreads != 0 ? serverThreads : 1;
+        if (tls_)
             configureTls();
-            httpsAcceptor_.emplace(ioc_);
-            openAcceptor(*httpsAcceptor_);
-        }
+
+        tcp::endpoint ep(net::ip::make_address("127.0.0.1"), 0);
+        acceptor_.open(ep.protocol());
+        acceptor_.set_option(net::socket_base::reuse_address(true));
+        acceptor_.bind(ep);
+        acceptor_.listen(net::socket_base::max_listen_connections);
+        port_ = acceptor_.local_endpoint().port();
+
+        net::co_spawn(ioc_, acceptLoop(), net::detached);
+        work_.emplace(net::make_work_guard(ioc_));
+        for (unsigned i = 0; i < threads; ++i)
+            pool_.emplace_back([this] { ioc_.run(); });
     }
 
     BenchServer(BenchServer const&) = delete;
@@ -64,30 +75,12 @@ public:
     }
 
     [[nodiscard]] unsigned short
-    httpPort() const
+    port() const
     {
-        return httpAcceptor_.local_endpoint().port();
+        return port_;
     }
 
-    // 0 when TLS is disabled.
-    [[nodiscard]] unsigned short
-    httpsPort() const
-    {
-        return httpsAcceptor_ ? httpsAcceptor_->local_endpoint().port() : 0;
-    }
-
-    void
-    start()
-    {
-        net::co_spawn(ioc_, acceptLoop(httpAcceptor_, false), net::detached);
-        if (httpsAcceptor_)
-            net::co_spawn(ioc_, acceptLoop(*httpsAcceptor_, true), net::detached);
-
-        work_.emplace(net::make_work_guard(ioc_));
-        for (unsigned i = 0; i < threads_; ++i)
-            pool_.emplace_back([this] { ioc_.run(); });
-    }
-
+private:
     void
     stop()
     {
@@ -96,9 +89,7 @@ public:
 
         net::post(ioc_, [this] {
             boost::system::error_code ec;
-            httpAcceptor_.close(ec);
-            if (httpsAcceptor_)
-                httpsAcceptor_->close(ec);
+            acceptor_.close(ec);
         });
         work_.reset();
         ioc_.stop();
@@ -106,17 +97,6 @@ public:
             if (t.joinable())
                 t.join();
         pool_.clear();
-    }
-
-private:
-    void
-    openAcceptor(tcp::acceptor& a)
-    {
-        tcp::endpoint ep(net::ip::make_address("127.0.0.1"), 0);
-        a.open(ep.protocol());
-        a.set_option(net::socket_base::reuse_address(true));
-        a.bind(ep);
-        a.listen(net::socket_base::max_listen_connections);
     }
 
     void
@@ -130,20 +110,20 @@ private:
     }
 
     net::awaitable<void>
-    acceptLoop(tcp::acceptor& acceptor, bool tls)
+    acceptLoop()
     {
         for (;;)
         {
             boost::system::error_code ec;
             tcp::socket socket =
-                co_await acceptor.async_accept(net::redirect_error(net::use_awaitable, ec));
+                co_await acceptor_.async_accept(net::redirect_error(net::use_awaitable, ec));
             if (ec)
             {
                 if (ec == net::error::operation_aborted)
                     break;
                 continue;
             }
-            if (tls)
+            if (tls_)
                 net::co_spawn(ioc_, sessionTls(std::move(socket)), net::detached);
             else
                 net::co_spawn(ioc_, sessionPlain(std::move(socket)), net::detached);
@@ -210,10 +190,10 @@ private:
 
     net::io_context ioc_;
     ssl::context sslCtx_;
-    tcp::acceptor httpAcceptor_;
-    std::optional<tcp::acceptor> httpsAcceptor_;
+    tcp::acceptor acceptor_;
+    bool tls_;
+    unsigned short port_{0};
     std::string body_;
-    unsigned threads_;
     std::vector<std::thread> pool_;
     std::optional<net::executor_work_guard<net::io_context::executor_type>> work_;
 };
