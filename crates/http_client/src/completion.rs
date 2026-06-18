@@ -1,3 +1,5 @@
+//! Drop guard ensuring `HttpCompletion::complete` is called exactly once.
+
 use crate::error::RequestFailure;
 use crate::ffi::{HttpCompletion, RequestResult};
 use cxx::UniquePtr;
@@ -14,12 +16,14 @@ pub(crate) struct CompletionGuard {
 }
 
 impl CompletionGuard {
+    /// Wraps `completion`; the guard disarms itself when [`complete`](Self::complete) is called.
     pub(crate) fn new(completion: UniquePtr<HttpCompletion>) -> Self {
         Self {
             completion: Some(completion),
         }
     }
 
+    /// Deliver `result` to C++ and disarm the guard so `Drop` does not fire `Canceled`.
     pub(crate) fn complete(mut self, result: RequestResult) {
         if let Some(mut c) = self.completion.take() {
             c.pin_mut().complete(result);

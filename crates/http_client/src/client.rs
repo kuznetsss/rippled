@@ -1,3 +1,9 @@
+//! Global `reqwest::Client` and TLS context management.
+//!
+//! `CLIENT` holds an `Option<reqwest::Client>` behind an `RwLock` so that
+//! `reset_tls_context` can clear it between successive `init_tls_context`
+//! calls without re-seating the `OnceLock` slot.
+
 use crate::error::{Error, Result};
 use crate::ffi::{Status, TlsConfig};
 use reqwest::Certificate;
@@ -25,6 +31,7 @@ pub(crate) fn reset_tls_context() -> Status {
     result.into()
 }
 
+/// Return a clone of the shared client, or `NotInitialized` if TLS context has not been set.
 pub(crate) fn get() -> Result<reqwest::Client> {
     let guard = slot().read().map_err(|_| Error::LockPoisoned)?;
     guard.as_ref().cloned().ok_or(Error::NotInitialized)
@@ -36,6 +43,11 @@ fn build_and_store(config: TlsConfig) -> Result<()> {
     Ok(())
 }
 
+/// Construct a `reqwest::Client` from `config`.
+///
+/// Redirects are disabled to preserve the legacy C++ client behaviour.
+/// When `verify` is `true`, `verify_file` (if set) replaces the default CA
+/// roots entirely; `verify_dir` (if set) adds additional certs on top.
 fn build_client(config: &TlsConfig) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         // Preserve legacy C++ client behaviour: no redirect following.

@@ -1,3 +1,5 @@
+//! HTTP request execution: FFI entry point and the underlying async logic.
+
 use std::time::Duration;
 
 use crate::client;
@@ -7,6 +9,8 @@ use crate::ffi::{HttpCompletion, HttpHeader, HttpMethod, Request, Response};
 use crate::runtime::Runtime;
 use cxx::UniquePtr;
 
+/// FFI entry point: spawns an async task on the shared runtime and guarantees
+/// `completion` fires exactly once via [`CompletionGuard`].
 pub(crate) fn http_request(request: Request, body: &[u8], completion: UniquePtr<HttpCompletion>) {
     // Guard must be captured state, not a body-local — see CompletionGuard.
     let guard = CompletionGuard::new(completion);

@@ -19,6 +19,15 @@
 
 namespace xrpl::detail {
 
+/**
+ * @brief Concrete HTTPCompletion that resumes an Asio completion handler.
+ *
+ * Posts the request result to the handler's associated executor (or the
+ * fallback executor supplied at construction) and holds an executor work guard
+ * so the target io_context stays alive until the result is delivered.
+ *
+ * @tparam Handler the Asio completion handler type to resume.
+ */
 template <class Handler>
 class HTTPCompletionImpl final : public HTTPCompletion
 {
@@ -28,6 +37,12 @@ private:
     boost::asio::executor_work_guard<boost::asio::any_io_executor> work_;
 
 public:
+    /**
+     * @brief Capture the handler and the executor that will run it.
+     *
+     * @param h completion handler to invoke with the result
+     * @param fallback executor used when @p h has no associated executor
+     */
     HTTPCompletionImpl(Handler h, boost::asio::any_io_executor fallback)
         : handler_(std::move(h))
         , executor_(boost::asio::get_associated_executor(handler_, fallback))
@@ -35,6 +50,9 @@ public:
     {
     }
 
+    /**
+     * @brief Convert the Rust result to std::expected and post it to the handler.
+     */
     void
     complete(::rs::http_client::RequestResult result) override
     {

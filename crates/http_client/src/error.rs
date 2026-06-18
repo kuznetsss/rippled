@@ -1,5 +1,8 @@
+//! Error types and their mappings to the cxx bridge result types.
+
 use crate::ffi::{ErrorCode, RequestError, RequestResult, Response, Status};
 
+/// Lifecycle errors for the runtime and TLS context; mapped to `ErrorCode` for FFI.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("failed to build the Tokio runtime: {0}")]
@@ -57,6 +60,10 @@ impl From<Result<()>> for Status {
     }
 }
 
+/// Per-request errors; mapped to [`RequestError`] for FFI.
+///
+/// `Timeout` and `Transport` both carry the full reqwest cause string, which
+/// surfaces in `RequestResult::message` on the C++ side.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RequestFailure {
     #[error("TLS context has not been initialized; call init_tls_context first")]

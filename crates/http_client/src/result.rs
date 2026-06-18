@@ -1,6 +1,9 @@
+//! Constructors that convert Rust results into cxx bridge value types.
+
 use crate::ffi::Response;
 
 impl Response {
+    /// Sentinel value used in error-path [`RequestResult`](crate::ffi::RequestResult) payloads.
     pub(crate) fn empty() -> Self {
         Response {
             status: 0,

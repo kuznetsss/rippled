@@ -16,11 +16,23 @@ struct RequestResult;
 
 namespace xrpl::detail {
 
-// complete() must NOT delete `this` — ownership belongs to the Rust UniquePtr.
+/**
+ * @brief Type-erased base for delivering an HTTP request result back to C++.
+ *
+ * The Rust client owns one of these as a cxx `UniquePtr` for the lifetime of a
+ * request and calls complete() exactly once when the request finishes.
+ */
 struct HTTPCompletion
 {
     virtual ~HTTPCompletion() = default;
 
+    /**
+     * @brief Deliver the request result.
+     *
+     * @note Must not delete `this` — ownership belongs to the Rust UniquePtr.
+     *
+     * @param result outcome of the request (a response or an error)
+     */
     virtual void
     complete(::rs::http_client::RequestResult result) = 0;
 };

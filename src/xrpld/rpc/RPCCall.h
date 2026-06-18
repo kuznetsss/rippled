@@ -26,6 +26,24 @@ namespace RPCCall {
 int
 fromCommandLine(Config const& config, std::vector<std::string> const& vCmd, Logs& logs);
 
+/**
+ * @brief Send a JSON-RPC request to @p strUrl and deliver the parsed reply.
+ *
+ * Issues an HTTP POST carrying the JSON-RPC method and params through the
+ * global HTTP client (see initHTTPClient()), completing on @p ioContext. The
+ * call is asynchronous; run @p ioContext to drive it to completion.
+ *
+ * @param ioContext io_context whose executor receives the completion
+ * @param strUrl endpoint URL (http or https)
+ * @param strUsername HTTP basic-auth username
+ * @param strPassword HTTP basic-auth password
+ * @param strMethod JSON-RPC method name
+ * @param jvParams JSON-RPC parameters
+ * @param quiet suppress the informational "connecting" log line
+ * @param logs log sink
+ * @param callbackFuncP invoked with the parsed JSON reply, if set
+ * @param headers extra HTTP headers to send with the request
+ */
 void
 fromNetwork(
     boost::asio::io_context& ioContext,

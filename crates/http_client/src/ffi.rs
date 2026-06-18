@@ -4,6 +4,7 @@ use std::time::Duration;
 
 #[cxx::bridge(namespace = "rs::http_client")]
 mod bridge {
+    /// Outcome code returned by lifecycle calls (runtime / TLS init/shutdown).
     #[derive(Debug)]
     enum ErrorCode {
         Ok,
@@ -47,6 +48,7 @@ mod bridge {
         body: Vec<u8>,
     }
 
+    /// Outcome code for an individual HTTP request.
     #[derive(Debug)]
     enum RequestError {
         Ok,
@@ -60,7 +62,9 @@ mod bridge {
         NotInitialized,
     }
 
+    /// TLS configuration passed to [`init_tls_context`].
     struct TlsConfig {
+        /// When `false`, certificate and hostname verification are disabled.
         verify: bool,
         /// Path to a PEM bundle that replaces the default CA roots.
         verify_file: String,
@@ -68,17 +72,42 @@ mod bridge {
         verify_dir: String,
     }
 
+    /// Value-based result for an HTTP request; delivered via `HttpCompletion::complete`.
     struct RequestResult {
         code: RequestError,
+        /// Full reqwest cause chain on failure; empty on success.
         message: String,
+        /// Populated only when `code == Ok`; zero-valued on error.
         response: Response,
     }
 
     extern "Rust" {
+        /// Initialize the shared Tokio multi-thread runtime with `threads_num` worker threads.
+        ///
+        /// Must be called once before any other function in this crate; returns
+        /// `AlreadyInitialized` if called again.
         fn init_tokio_runtime(threads_num: usize) -> Status;
+
+        /// Drain in-flight tasks and shut down the runtime, waiting at most `timeout_ms` ms.
+        ///
+        /// Safe to call when not initialized (returns `NotInitialized`).
+        /// A second call after a successful shutdown is a no-op.
         fn shutdown_tokio_runtime(timeout_ms: u64) -> Status;
+
+        /// Build and store the shared `reqwest::Client` from `config`.
+        ///
+        /// Replaces any previously stored client.  Must be called before
+        /// [`http_request`]; returns `NotInitialized` on requests if skipped.
         fn init_tls_context(config: TlsConfig) -> Status;
+
+        /// Drop the stored `reqwest::Client`, reverting to the uninitialized state.
         fn reset_tls_context() -> Status;
+
+        /// Enqueue `request` on the shared Tokio runtime; `completion` is called exactly once.
+        ///
+        /// Ownership of `completion` transfers into the async task.  If the
+        /// task is dropped before finishing (e.g. on shutdown), the
+        /// `CompletionGuard` fires `completion` with `Canceled`.
         fn http_request(request: Request, body: &[u8], completion: UniquePtr<HttpCompletion>);
     }
 

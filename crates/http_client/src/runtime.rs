@@ -1,9 +1,16 @@
+//! Process-wide Tokio runtime, initialized once and shared across all requests.
+
 use crate::error::{Error, Result};
 use std::{
     sync::{OnceLock, RwLock},
     time::Duration,
 };
 
+/// Wrapper around a lazily-initialized, process-wide Tokio multi-thread runtime.
+///
+/// The `RwLock<Option<...>>` inner allows `shutdown` to take the runtime out
+/// (dropping it after the timeout) without invalidating the `OnceLock` slot,
+/// so that subsequent calls get `ShutDown` rather than crashing.
 pub(crate) struct Runtime {
     inner: RwLock<Option<tokio::runtime::Runtime>>,
 }
@@ -11,6 +18,7 @@ pub(crate) struct Runtime {
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 impl Runtime {
+    /// Build and register the runtime; returns `AlreadyInitialized` if called again.
     pub(crate) fn init(threads_num: usize) -> Result<()> {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .thread_name_fn(|| {

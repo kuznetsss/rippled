@@ -49,6 +49,14 @@ public:
             std::string adminUser;
             std::string adminPassword;
 
+            /**
+             * @brief Assemble the client endpoint URL from these settings.
+             *
+             * Produces `scheme://host:port/`, choosing the scheme from
+             * `secure` and bracketing a bare IPv6 host.
+             *
+             * @return the assembled endpoint URL
+             */
             [[nodiscard]] std::string
             url() const;
         };
