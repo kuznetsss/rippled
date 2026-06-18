@@ -14,7 +14,6 @@
 
 #include <boost/asio/io_context.hpp>
 
-#include <cstdint>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -50,33 +49,14 @@ public:
         ParsedUrl pUrl;
 
         if (!parseUrl(pUrl, strUrl))
-        {
             Throw<std::runtime_error>("Failed to parse url.");
-        }
-        else if (pUrl.scheme == "https")
-        {
-            ssl_ = true;
-        }
-        else if (pUrl.scheme != "http")
-        {
+
+        if (pUrl.scheme != "http" && pUrl.scheme != "https")
             Throw<std::runtime_error>("Only http and https is supported.");
-        }
 
         seq_ = 1;
 
-        ip_ = pUrl.domain;
-        if (!pUrl.port)
-        {
-            port_ = ssl_ ? 443 : 80;
-        }
-        else
-        {
-            port_ = *pUrl.port;
-        }
-        path_ = pUrl.path;
-
-        JLOG(j_.info()) << "RPCCall::fromNetwork sub: ip=" << ip_ << " port=" << port_
-                        << " ssl= " << (ssl_ ? "yes" : "no") << " path='" << path_ << "'";
+        JLOG(j_.info()) << "RPCCall::fromNetwork sub: url='" << url_ << "'";
     }
 
     ~RPCSubImp() override = default;
@@ -156,18 +136,15 @@ private:
                 // XXX Might not need this in a try.
                 try
                 {
-                    JLOG(j_.info()) << "RPCCall::fromNetwork: " << ip_;
+                    JLOG(j_.info()) << "RPCCall::fromNetwork: " << url_;
 
                     RPCCall::fromNetwork(
                         ioContext_,
-                        ip_,
-                        port_,
+                        url_,
                         username_,
                         password_,
-                        path_,
                         "event",
                         jvEvent,
-                        ssl_,
                         true,
                         logs_);
                 }
@@ -184,12 +161,8 @@ private:
     JobQueue& jobQueue_;
 
     std::string url_;
-    std::string ip_;
-    std::uint16_t port_;
-    bool ssl_{false};
     std::string username_;
     std::string password_;
-    std::string path_;
 
     int seq_;  // Next id to allocate.
 

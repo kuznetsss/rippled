@@ -5,8 +5,8 @@
 #include <xrpl/beast/utility/Journal.h>
 
 #include <chrono>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,15 +21,15 @@ initHTTPClient(
     std::string const& sslVerifyDir,
     beast::Journal j)
 {
-    // Initialise the Tokio runtime.  AlreadyInitialized is tolerated so that
-    // test processes that construct many environments don't fail on subsequent
-    // calls.
-    auto rtStatus = ::rs::http_client::init_tokio_runtime(numThreads);
-    if (rtStatus.code != ::rs::http_client::ErrorCode::Ok &&
-        rtStatus.code != ::rs::http_client::ErrorCode::AlreadyInitialized)
-    {
-        Throw<std::runtime_error>(std::string(rtStatus.message));
-    }
+    auto throwIfNotOk = [](::rs::http_client::Status const& status) {
+        if (status.code != ::rs::http_client::ErrorCode::Ok &&
+            status.code != ::rs::http_client::ErrorCode::AlreadyInitialized)
+        {
+            Throw<std::runtime_error>(std::string(status.message));
+        }
+    };
+    auto const rtStatus = ::rs::http_client::init_tokio_runtime(numThreads);
+    throwIfNotOk(rtStatus);
 
     if (rtStatus.code == ::rs::http_client::ErrorCode::AlreadyInitialized)
     {
@@ -40,34 +40,25 @@ initHTTPClient(
         JLOG(j.debug()) << "initHTTPClient: Tokio runtime initialized";
     }
 
-    // Initialise the TLS context.
-    ::rs::http_client::TlsConfig tlsConfig;
-    tlsConfig.verify = sslVerify;
-    tlsConfig.verify_file = rust::String(sslVerifyFile);
-    tlsConfig.verify_dir = rust::String(sslVerifyDir);
+    ::rs::http_client::TlsConfig tlsConfig{
+        .verify = sslVerify,
+        .verify_file = rust::String(sslVerifyFile),
+        .verify_dir = rust::String(sslVerifyDir),
+    };
 
     // Re-initialising the TLS context overwrites the previous reqwest client
     // with the supplied config; AlreadyInitialized is tolerated for symmetry
     // with the runtime path above.
     auto tlsStatus = ::rs::http_client::init_tls_context(std::move(tlsConfig));
-    if (tlsStatus.code != ::rs::http_client::ErrorCode::Ok &&
-        tlsStatus.code != ::rs::http_client::ErrorCode::AlreadyInitialized)
-    {
-        Throw<std::runtime_error>(std::string(tlsStatus.message));
-    }
-
+    throwIfNotOk(tlsStatus);
     JLOG(j.debug()) << "initHTTPClient: TLS context initialized";
 }
 
 void
 shutdownHTTPClient(std::chrono::milliseconds timeout)
 {
-    auto rtStatus = ::rs::http_client::shutdown_tokio_runtime(
-        static_cast<uint64_t>(timeout.count()));
-    (void)rtStatus;  // ignore errors — must not throw from RAII
-
-    auto tlsStatus = ::rs::http_client::reset_tls_context();
-    (void)tlsStatus;  // ignore errors — must not throw from RAII
+    ::rs::http_client::shutdown_tokio_runtime(static_cast<uint64_t>(timeout.count()));
+    ::rs::http_client::reset_tls_context();
 }
 
 HTTPRequestBuilder::HTTPRequestBuilder(

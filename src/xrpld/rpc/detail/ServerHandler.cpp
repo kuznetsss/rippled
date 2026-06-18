@@ -60,6 +60,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <format>
 #include <exception>
 #include <map>
 #include <memory>
@@ -1223,6 +1224,14 @@ setupClient(ServerHandler::Setup& setup)
     setup.client.password = iter->password;
     setup.client.adminUser = iter->adminUser;
     setup.client.adminPassword = iter->adminPassword;
+}
+
+std::string
+ServerHandler::Setup::ClientT::url() const
+{
+    auto const authority =
+        (ip.contains(':') && !ip.starts_with('[')) ? std::format("[{}]", ip) : ip;
+    return std::format("{}://{}:{}/", secure ? "https" : "http", authority, port);
 }
 
 // Fill out the overlay portion of the Setup

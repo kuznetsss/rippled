@@ -29,14 +29,11 @@ fromCommandLine(Config const& config, std::vector<std::string> const& vCmd, Logs
 void
 fromNetwork(
     boost::asio::io_context& ioContext,
-    std::string const& strIp,
-    std::uint16_t const iPort,
+    std::string const& strUrl,
     std::string const& strUsername,
     std::string const& strPassword,
-    std::string const& strPath,
     std::string const& strMethod,
     json::Value const& jvParams,
-    bool const bSSL,
     bool quiet,
     Logs& logs,
     std::function<void(json::Value const& jvInput)> callbackFuncP =

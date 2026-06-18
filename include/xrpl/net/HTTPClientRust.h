@@ -1,11 +1,11 @@
 #pragma once
 
+#include <xrpl/beast/utility/Journal.h>
+
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/async_result.hpp>
 
 #include <rs_http_client_cxxbridge/ffi.h>
-
-#include <xrpl/beast/utility/Journal.h>
 
 #include <chrono>
 #include <cstddef>
@@ -35,10 +35,15 @@ initHTTPClient(
 // Tear down the Tokio runtime and TLS context.  Must not throw — called
 // from RAII destructors.  Errors are logged only.
 void
-shutdownHTTPClient(
-    std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
+shutdownHTTPClient(std::chrono::milliseconds timeout = std::chrono::milliseconds{2000});
 
-
+struct HTTPClientShutdownGuard
+{
+    ~HTTPClientShutdownGuard()
+    {
+        xrpl::shutdownHTTPClient();
+    }
+};
 
 // namespace detail {
 //
@@ -106,8 +111,7 @@ public:
             rust::Slice<uint8_t const> bodySlice = body.empty()
                 ? rust::Slice<uint8_t const>{}
                 : rust::Slice<uint8_t const>(body.data(), body.size());
-            ::rs::http_client::http_request(
-                std::move(request), bodySlice, std::move(completion));
+            ::rs::http_client::http_request(std::move(request), bodySlice, std::move(completion));
         };
         return boost::asio::async_initiate<
             CompletionToken,
@@ -118,34 +122,9 @@ public:
             std::move(request_),
             std::move(body_));
     }
-
-    /*
-    template <class CompletionToken>
-    static auto
-    asyncRequestAny(
-        boost::asio::any_io_executor executor,
-        std::vector<::rs::http_client::Request> requests,
-        CompletionToken&& token)
-    {
-        auto initiation = [](auto handler,
-                             boost::asio::any_io_executor executor,
-                             std::vector<::rs::http_client::Request> requests) {
-            using HandlerType = std::decay_t<decltype(handler)>;
-            // Shared ownership lets the per-site completion lambdas be copyable.
-            auto state = std::make_shared<detail::FailoverState<HandlerType>>(
-                std::move(executor), std::move(requests), std::move(handler));
-            state->next(state);
-        };
-        return boost::asio::async_initiate<
-            CompletionToken,
-            void(boost::system::error_code, ::rs::http_client::Response)>(
-            std::move(initiation), token, std::move(executor), std::move(requests));
-    }
-    */
 };
 
 }  // namespace xrpl
 
-// #include <xrpl/net/detail/FailoverState.ipp>
 
 #undef XRPL_NET_HTTPCLIENTRUST_INTERNAL

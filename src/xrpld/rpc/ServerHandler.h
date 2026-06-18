@@ -48,6 +48,9 @@ public:
             std::string password;
             std::string adminUser;
             std::string adminPassword;
+
+            [[nodiscard]] std::string
+            url() const;
         };
 
         // Configuration when acting in client role

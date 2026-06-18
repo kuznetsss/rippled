@@ -41,6 +41,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <format>
 #include <functional>
 #include <iostream>
 #include <optional>
@@ -1678,19 +1679,16 @@ rpcClient(
                 boost::asio::io_context isService;
                 RPCCall::fromNetwork(
                     isService,
-                    setup.client.ip,
-                    setup.client.port,
+                    setup.client.url(),
                     setup.client.user,
                     setup.client.password,
-                    "",
                     // Allow parser to rewrite method.
                     [&]() -> std::string {
                         if (jvRequest.isMember(jss::method))
                             return jvRequest[jss::method].asString();
                         return jvRequest.isArray() ? "batch" : args[0];
                     }(),
-                    jvParams,                                    // Parsed, execute.
-                    static_cast<int>(setup.client.secure) != 0,  // Use SSL
+                    jvParams,  // Parsed, execute.
                     config.quiet(),
                     logs,
                     std::bind(RPCCallImp::callRPCHandler, &jvOutput, std::placeholders::_1),
@@ -1778,14 +1776,11 @@ fromCommandLine(Config const& config, std::vector<std::string> const& vCmd, Logs
 void
 fromNetwork(
     boost::asio::io_context& ioContext,
-    std::string const& strIp,
-    std::uint16_t const iPort,
+    std::string const& strUrl,
     std::string const& strUsername,
     std::string const& strPassword,
-    std::string const& strPath,
     std::string const& strMethod,
     json::Value const& jvParams,
-    bool const bSSL,
     bool const quiet,
     Logs& logs,
     std::function<void(json::Value const& jvInput)> callbackFuncP,
@@ -1796,13 +1791,8 @@ fromNetwork(
     // Connect to localhost
     if (!quiet)
     {
-        JLOG(j.info()) << (bSSL ? "Securely connecting to " : "Connecting to ") << strIp << ":"
-                       << iPort << std::endl;
+        JLOG(j.info()) << "Connecting to " << strUrl << std::endl;
     }
-
-    // HTTP basic authentication
-    headers["Authorization"] =
-        std::string("Basic ") + base64Encode(strUsername + ":" + strPassword);
 
     // Number of bytes to try to receive if no Content-Length header received
     constexpr auto kRpcReplyMaxBytes = megabytes(256);
@@ -1813,18 +1803,13 @@ fromNetwork(
     // Build the JSON-RPC request body
     std::string body = jsonrpcRequest(strMethod, jvParams, json::Value(1));
 
-    // Build the URL; wrap bare IPv6 literals in brackets
-    std::string scheme = bSSL ? "https://" : "http://";
-    std::string host = strIp;
-    if (host.contains(':') && !host.starts_with('['))
-        host = "[" + host + "]";
-    std::string url =
-        scheme + host + ":" + std::to_string(iPort) + (strPath.empty() ? "/" : strPath);
-
-    HTTPRequestBuilder builder(url, ::rs::http_client::HTTPMethod::Post, kRpcWebhookTimeout);
+    HTTPRequestBuilder builder(strUrl, ::rs::http_client::HTTPMethod::Post, kRpcWebhookTimeout);
     builder.addHeader("Content-Type", "application/json")
         .addHeader("Accept", "application/json")
-        .addHeader("User-Agent", systemName() + "-json-rpc/v1");
+        .addHeader("User-Agent", std::format("{}-json-rpc/v1", systemName()));
+
+    auto authValue = base64Encode(std::format("{}:{}", strUsername, strPassword));
+    builder.addHeader("Authorization", std::format("Basic {}", std::move(authValue)));
 
     for (auto const& [name, value] : headers)
         builder.addHeader(name, value);
@@ -1835,8 +1820,8 @@ fromNetwork(
     auto callbackFuncPCopy = callbackFuncP;
     builder.asyncSubmit(
         ioContext.get_executor(),
-        [callbackFuncPCopy, j](
-            std::expected<::rs::http_client::Response, HttpError> result) mutable {
+        [callbackFuncPCopy,
+         j](std::expected<::rs::http_client::Response, HttpError> result) mutable {
             std::string data;
             if (result.has_value())
             {

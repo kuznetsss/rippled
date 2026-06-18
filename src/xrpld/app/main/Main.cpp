@@ -1,6 +1,5 @@
 #include <xrpld/app/main/Application.h>
 #include <xrpld/core/Config.h>
-#include <xrpl/net/HTTPClientRust.h>
 #include <xrpld/core/TimeKeeper.h>
 #include <xrpld/rpc/RPCCall.h>
 #include <xrpld/rpc/handlers/server_info/ServerDefinitions.h>
@@ -16,6 +15,7 @@
 #include <xrpl/core/StartUpType.h>
 #include <xrpl/git/Git.h>
 #include <xrpl/json/json_writer.h>
+#include <xrpl/net/HTTPClientRust.h>
 #include <xrpl/protocol/BuildInfo.h>
 #include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/server/Vacuum.h>
@@ -579,15 +579,7 @@ run(int argc, char** argv)
     config->setup(
         configFile, vm.contains("quiet"), vm.contains("silent"), vm.contains("standalone"));
 
-    // Shut down the Rust HTTP runtime on every exit path.  Declared before
-    // `app` so the application is destroyed before the runtime tears down.
-    struct HTTPClientShutdownGuard
-    {
-        ~HTTPClientShutdownGuard()
-        {
-            xrpl::shutdownHTTPClient();
-        }
-    } httpClientShutdownGuard;
+    [[maybe_unused]] HTTPClientShutdownGuard guard{};
 
     if (vm.contains("vacuum"))
     {
