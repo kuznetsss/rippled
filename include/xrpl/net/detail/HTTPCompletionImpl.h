@@ -1,7 +1,7 @@
 #pragma once
 
-#if !defined(XRPL_NET_HTTPCLIENTRUST_INTERNAL)
-#error "include <xrpl/net/HTTPClientRust.h>, not this detail header directly"
+#if !defined(XRPL_NET_HTTPCLIENT_INTERNAL)
+#error "include <xrpl/net/HTTPClient.h>, not this detail header directly"
 #endif
 
 #include <xrpl/net/detail/HTTPCompletion.h>

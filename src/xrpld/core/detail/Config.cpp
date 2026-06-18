@@ -10,7 +10,7 @@
 #include <xrpl/beast/utility/instrumentation.h>
 #include <xrpl/config/BasicConfig.h>
 #include <xrpl/config/Constants.h>
-#include <xrpl/net/HTTPClientRust.h>
+#include <xrpl/net/HTTPClient.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/rdb/DBInit.h>

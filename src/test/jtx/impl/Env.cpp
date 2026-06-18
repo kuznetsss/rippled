@@ -33,7 +33,7 @@
 #include <xrpl/core/NetworkIDService.h>
 #include <xrpl/core/ServiceRegistry.h>
 #include <xrpl/json/to_string.h>
-#include <xrpl/net/HTTPClientRust.h>
+#include <xrpl/net/HTTPClient.h>
 #include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/Asset.h>
 #include <xrpl/protocol/ErrorCodes.h>

@@ -1,4 +1,4 @@
-#include <xrpl/net/HTTPClientRust.h>
+#include <xrpl/net/HTTPClient.h>
 
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>  // IWYU pragma: keep
@@ -190,7 +190,7 @@ private:
 // The Tokio runtime is a process-wide OnceLock: initialise it once for the
 // whole suite.  The reqwest client (TLS context) is rebuilt before each test
 // with verification disabled, which is sufficient for plain-HTTP loopback.
-struct HTTPClientRustTest : ::testing::Test
+struct HTTPClientTest : ::testing::Test
 {
     static void
     SetUpTestSuite()
@@ -210,7 +210,7 @@ struct HTTPClientRustTest : ::testing::Test
 
     // A constructor is preferred over SetUp().  init_tls_context never fails for
     // a verification-disabled build, so a non-fatal EXPECT is sufficient.
-    HTTPClientRustTest()
+    HTTPClientTest()
     {
         ::rs::http_client::TlsConfig cfg{};
         cfg.verify = false;
@@ -219,7 +219,7 @@ struct HTTPClientRustTest : ::testing::Test
             << static_cast<std::string>(status.message);
     }
 
-    ~HTTPClientRustTest() override
+    ~HTTPClientTest() override
     {
         ::rs::http_client::reset_tls_context();
     }
@@ -233,12 +233,12 @@ struct HTTPClientRustTest : ::testing::Test
 
 // Cancel-on-drop fixture: it deliberately never initialises the Tokio runtime.
 // gtest never interleaves test suites, so whenever these tests run the runtime
-// is either not yet initialised or already shut down by HTTPClientRustTest's
+// is either not yet initialised or already shut down by HTTPClientTest's
 // TearDownTestSuite.  Either way Runtime::spawn fails, http_request drops the
 // completion guard, and the guard's destructor delivers Canceled.  This fixture
 // must not initialise or shut down the runtime itself — that OnceLock is
 // process-global and shared with the main suite.
-struct HTTPClientRustNoRuntimeTest : ::testing::Test
+struct HTTPClientNoRuntimeTest : ::testing::Test
 {
 };
 
@@ -261,7 +261,7 @@ runWithDeadline(
 
 }  // namespace
 
-TEST_F(HTTPClientRustTest, PostBodyRoundTrip)
+TEST_F(HTTPClientTest, PostBodyRoundTrip)
 {
     TestHTTPServer server;
     std::string const responseBody = "response payload from server";
@@ -301,7 +301,7 @@ TEST_F(HTTPClientRustTest, PostBodyRoundTrip)
     EXPECT_EQ(got, responseBody);
 }
 
-TEST_F(HTTPClientRustTest, LargeResponseBody)
+TEST_F(HTTPClientTest, LargeResponseBody)
 {
     TestHTTPServer server;
     std::string const responseBody(256 * 1024, 'x');
@@ -329,7 +329,7 @@ TEST_F(HTTPClientRustTest, LargeResponseBody)
     EXPECT_EQ(resultExp->body.size(), responseBody.size());
 }
 
-TEST_F(HTTPClientRustTest, HandlerOnIocThread)
+TEST_F(HTTPClientTest, HandlerOnIocThread)
 {
     TestHTTPServer server;
     server.setResponseBody("ok");
@@ -355,7 +355,7 @@ TEST_F(HTTPClientRustTest, HandlerOnIocThread)
         << "handler was not dispatched onto the io_context thread";
 }
 
-TEST_F(HTTPClientRustTest, UseFuture)
+TEST_F(HTTPClientTest, UseFuture)
 {
     TestHTTPServer server;
     server.setResponseBody("future body");
@@ -381,7 +381,7 @@ TEST_F(HTTPClientRustTest, UseFuture)
     EXPECT_EQ(got, "future body");
 }
 
-TEST_F(HTTPClientRustTest, NotInitializedSurfacesError)
+TEST_F(HTTPClientTest, NotInitializedSurfacesError)
 {
     // SetUp() built a client; drop it so the request short-circuits.
     ::rs::http_client::reset_tls_context();
@@ -407,7 +407,7 @@ TEST_F(HTTPClientRustTest, NotInitializedSurfacesError)
     EXPECT_EQ(resultExp.error().code, ::rs::http_client::RequestError::NotInitialized);
 }
 
-TEST_F(HTTPClientRustTest, UseAwaitable)
+TEST_F(HTTPClientTest, UseAwaitable)
 {
     TestHTTPServer server;
     server.setResponseBody("awaitable body");
@@ -438,7 +438,7 @@ TEST_F(HTTPClientRustTest, UseAwaitable)
     EXPECT_EQ(got, "awaitable body");
 }
 
-TEST_F(HTTPClientRustTest, YieldContext)
+TEST_F(HTTPClientTest, YieldContext)
 {
     TestHTTPServer server;
     server.setResponseBody("yield body");
@@ -472,7 +472,7 @@ TEST_F(HTTPClientRustTest, YieldContext)
     EXPECT_EQ(got, "yield body");
 }
 
-TEST_F(HTTPClientRustTest, MaxResponseSizeExceeded)
+TEST_F(HTTPClientTest, MaxResponseSizeExceeded)
 {
     TestHTTPServer server;
     server.setResponseBody(std::string(100 * 1024, 'x'));
@@ -498,7 +498,7 @@ TEST_F(HTTPClientRustTest, MaxResponseSizeExceeded)
     EXPECT_EQ(resultExp.error().code, ::rs::http_client::RequestError::TooLarge);
 }
 
-TEST_F(HTTPClientRustTest, NonSuccessStatusPassthrough)
+TEST_F(HTTPClientTest, NonSuccessStatusPassthrough)
 {
     TestHTTPServer server;
     server.setStatusCode(404);
@@ -528,7 +528,7 @@ TEST_F(HTTPClientRustTest, NonSuccessStatusPassthrough)
     EXPECT_EQ(got, "not found");
 }
 
-TEST_F(HTTPClientRustTest, ConnectionFailedSurfacesError)
+TEST_F(HTTPClientTest, ConnectionFailedSurfacesError)
 {
     // TLS context is already initialized by SetUp(); do not reset it.
     // Target a port that will refuse the connection immediately.
@@ -553,7 +553,7 @@ TEST_F(HTTPClientRustTest, ConnectionFailedSurfacesError)
     EXPECT_EQ(resultExp.error().code, ::rs::http_client::RequestError::Failed);
 }
 
-TEST_F(HTTPClientRustTest, RequestTimeout)
+TEST_F(HTTPClientTest, RequestTimeout)
 {
     TestHTTPServer server;
     server.setResponseBody("too slow");
@@ -580,7 +580,7 @@ TEST_F(HTTPClientRustTest, RequestTimeout)
     EXPECT_EQ(resultExp.error().code, ::rs::http_client::RequestError::Timeout);
 }
 
-TEST_F(HTTPClientRustNoRuntimeTest, DroppedCompletionSurfacesCanceled)
+TEST_F(HTTPClientNoRuntimeTest, DroppedCompletionSurfacesCanceled)
 {
     // With no spawnable Tokio runtime, http_request cannot schedule the request
     // and drops the completion guard, which must deliver Canceled.  No server or

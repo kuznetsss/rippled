@@ -15,7 +15,7 @@
 #include <xrpl/core/StartUpType.h>
 #include <xrpl/git/Git.h>
 #include <xrpl/json/json_writer.h>
-#include <xrpl/net/HTTPClientRust.h>
+#include <xrpl/net/HTTPClient.h>
 #include <xrpl/protocol/BuildInfo.h>
 #include <xrpl/protocol/SystemParameters.h>
 #include <xrpl/server/Vacuum.h>

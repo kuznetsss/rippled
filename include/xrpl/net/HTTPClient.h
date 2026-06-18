@@ -63,7 +63,7 @@ struct HttpError
 // The detail headers below are implementation fragments of this public header,
 // not standalone headers.  This token grants them access; they #error without
 // it so they cannot be included directly.  Undefined at the bottom of the file.
-#define XRPL_NET_HTTPCLIENTRUST_INTERNAL
+#define XRPL_NET_HTTPCLIENT_INTERNAL
 #include <xrpl/net/detail/HTTPCompletionImpl.h>
 
 namespace xrpl {
@@ -127,4 +127,4 @@ public:
 }  // namespace xrpl
 
 
-#undef XRPL_NET_HTTPCLIENTRUST_INTERNAL
+#undef XRPL_NET_HTTPCLIENT_INTERNAL

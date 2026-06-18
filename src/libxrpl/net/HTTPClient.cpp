@@ -1,4 +1,4 @@
-#include <xrpl/net/HTTPClientRust.h>
+#include <xrpl/net/HTTPClient.h>
 
 #include <xrpl/basics/Log.h>
 #include <xrpl/basics/contract.h>
