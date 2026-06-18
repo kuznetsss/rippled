@@ -76,19 +76,13 @@ async fn execute_with(
         .map(|n| (n as usize).min(request.max_response_bytes))
         .unwrap_or(0);
     let mut body: Vec<u8> = Vec::with_capacity(initial);
-    let mut stream = response;
+    let mut body_stream = response;
 
-    loop {
-        match stream.chunk().await {
-            Ok(Some(chunk)) => {
-                if body.len() + chunk.len() > request.max_response_bytes {
-                    return Err(RequestFailure::TooLarge);
-                }
-                body.extend_from_slice(&chunk);
-            }
-            Ok(None) => break,
-            Err(e) => return Err(e.into()),
+    while let Some(chunk) = body_stream.chunk().await? {
+        if body.len() + chunk.len() > request.max_response_bytes {
+            return Err(RequestFailure::TooLarge);
         }
+        body.extend_from_slice(&chunk);
     }
 
     Ok(Response {
