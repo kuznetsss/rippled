@@ -14,9 +14,6 @@ pub enum Error {
     #[error("runtime is not initialized")]
     NotInitialized,
 
-    #[error("runtime has been shut down")]
-    ShutDown,
-
     #[error("runtime lock is poisoned")]
     LockPoisoned,
 
@@ -37,7 +34,6 @@ impl From<&Error> for ErrorCode {
             Error::RuntimeBuild(_) => ErrorCode::RuntimeBuild,
             Error::AlreadyInitialized => ErrorCode::AlreadyInitialized,
             Error::NotInitialized => ErrorCode::NotInitialized,
-            Error::ShutDown => ErrorCode::ShutDown,
             Error::LockPoisoned => ErrorCode::LockPoisoned,
             Error::CertificateReading(_) => ErrorCode::CertificateReading,
             Error::TlsConfig(_) => ErrorCode::TlsConfig,
@@ -150,12 +146,6 @@ mod tests {
     }
 
     #[test]
-    fn error_code_shut_down() {
-        let e = Error::ShutDown;
-        assert!(matches!(ErrorCode::from(&e), ErrorCode::ShutDown));
-    }
-
-    #[test]
     fn error_code_lock_poisoned() {
         let e = Error::LockPoisoned;
         assert!(matches!(ErrorCode::from(&e), ErrorCode::LockPoisoned));
@@ -170,20 +160,29 @@ mod tests {
     #[test]
     fn request_error_not_initialized() {
         let f = RequestFailure::NotInitialized;
-        assert!(matches!(RequestError::from(&f), RequestError::NotInitialized));
+        assert!(matches!(
+            RequestError::from(&f),
+            RequestError::NotInitialized
+        ));
     }
 
     #[test]
     fn request_error_invalid_header_name() {
         // Both InvalidHeaderName and InvalidHeaderValue map to InvalidHeader.
         let f = RequestFailure::InvalidHeaderName("X-Bad".to_string());
-        assert!(matches!(RequestError::from(&f), RequestError::InvalidHeader));
+        assert!(matches!(
+            RequestError::from(&f),
+            RequestError::InvalidHeader
+        ));
     }
 
     #[test]
     fn request_error_invalid_header_value() {
         let f = RequestFailure::InvalidHeaderValue("bad\nvalue".to_string());
-        assert!(matches!(RequestError::from(&f), RequestError::InvalidHeader));
+        assert!(matches!(
+            RequestError::from(&f),
+            RequestError::InvalidHeader
+        ));
     }
 
     #[test]

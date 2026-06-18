@@ -56,10 +56,10 @@ public:
     void
     complete(::rs::http_client::RequestResult result) override
     {
-        std::expected<::rs::http_client::Response, HttpError> expectedResult =
+        std::expected<::rs::http_client::Response, xrpl::HttpError> expectedResult =
             (result.code == ::rs::http_client::RequestError::Ok)
-            ? std::expected<::rs::http_client::Response, HttpError>{std::move(result.response)}
-            : std::unexpected(HttpError{result.code, std::string(result.message)});
+            ? std::expected<::rs::http_client::Response, xrpl::HttpError>{std::move(result.response)}
+            : std::unexpected(xrpl::HttpError{result.code, std::string(result.message)});
 
         // Work guard is released inside the lambda before the handler fires to
         // avoid potential deadlocks on io_context::stop().

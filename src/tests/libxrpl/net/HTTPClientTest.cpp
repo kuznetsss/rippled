@@ -187,41 +187,22 @@ private:
     }
 };
 
-// The Tokio runtime is a process-wide OnceLock: initialise it once for the
-// whole suite.  The reqwest client (TLS context) is rebuilt before each test
-// with verification disabled, which is sufficient for plain-HTTP loopback.
+// The Tokio runtime is now re-initialisable after shutdown, so each test gets
+// a fresh runtime + TLS context via the ctor/dtor.  1 worker thread suffices
+// for loopback; verification is disabled for plain-HTTP tests.
 struct HTTPClientTest : ::testing::Test
 {
-    static void
-    SetUpTestSuite()
-    {
-        auto status = ::rs::http_client::init_tokio_runtime(2);
-        ASSERT_TRUE(
-            status.code == ::rs::http_client::ErrorCode::Ok ||
-            status.code == ::rs::http_client::ErrorCode::AlreadyInitialized)
-            << static_cast<std::string>(status.message);
-    }
-
-    static void
-    TearDownTestSuite()
-    {
-        ::rs::http_client::shutdown_tokio_runtime(2000 /*ms*/);
-    }
-
-    // A constructor is preferred over SetUp().  init_tls_context never fails for
-    // a verification-disabled build, so a non-fatal EXPECT is sufficient.
     HTTPClientTest()
     {
-        ::rs::http_client::TlsConfig cfg{};
-        cfg.verify = false;
-        auto status = ::rs::http_client::init_tls_context(cfg);
-        EXPECT_EQ(status.code, ::rs::http_client::ErrorCode::Ok)
-            << static_cast<std::string>(status.message);
+        // Re-initialisable runtime: each test gets a fresh runtime + TLS context.
+        // 1 worker thread suffices for loopback; verification disabled for plain HTTP.
+        xrpl::initHTTPClient(
+            1, false, "", "", beast::Journal{beast::Journal::getNullSink()});
     }
 
     ~HTTPClientTest() override
     {
-        ::rs::http_client::reset_tls_context();
+        xrpl::shutdownHTTPClient(std::chrono::milliseconds{200});
     }
 
     static std::string
@@ -233,11 +214,10 @@ struct HTTPClientTest : ::testing::Test
 
 // Cancel-on-drop fixture: it deliberately never initialises the Tokio runtime.
 // gtest never interleaves test suites, so whenever these tests run the runtime
-// is either not yet initialised or already shut down by HTTPClientTest's
-// TearDownTestSuite.  Either way Runtime::spawn fails, http_request drops the
-// completion guard, and the guard's destructor delivers Canceled.  This fixture
-// must not initialise or shut down the runtime itself — that OnceLock is
-// process-global and shared with the main suite.
+// has been shut down by the most recent HTTPClientTest destructor.
+// Runtime::spawn therefore fails, http_request drops the completion guard, and
+// the guard's destructor delivers Canceled.  This fixture must not initialise
+// or shut down the runtime itself.
 struct HTTPClientNoRuntimeTest : ::testing::Test
 {
 };

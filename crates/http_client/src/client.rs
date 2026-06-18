@@ -12,7 +12,6 @@ use std::{
     sync::{OnceLock, RwLock},
 };
 
-// TODO: maybe we could store client in a better way?
 static CLIENT: OnceLock<RwLock<Option<reqwest::Client>>> = OnceLock::new();
 
 fn slot() -> &'static RwLock<Option<reqwest::Client>> {

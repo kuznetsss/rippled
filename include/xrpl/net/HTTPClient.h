@@ -18,6 +18,23 @@
 #include <utility>
 #include <vector>
 
+namespace xrpl {
+
+/**
+ * @brief Error details for a failed HTTP request.
+ *
+ * Delivered as the error alternative of a request completion's std::expected.
+ * `code` is a coarse category from the Rust client; `message` carries the
+ * flattened reqwest cause chain.
+ */
+struct HttpError
+{
+    ::rs::http_client::RequestError code;
+    std::string message;
+};
+
+}  // namespace xrpl
+
 #define XRPL_NET_HTTPCLIENT_INTERNAL
 #include <xrpl/net/detail/HTTPCompletionImpl.h>
 
@@ -75,19 +92,6 @@ struct HTTPClientShutdownGuard
     {
         xrpl::shutdownHTTPClient();
     }
-};
-
-/**
- * @brief Error details for a failed HTTP request.
- *
- * Delivered as the error alternative of a request completion's std::expected.
- * `code` is a coarse category from the Rust client; `message` carries the
- * flattened reqwest cause chain.
- */
-struct HttpError
-{
-    ::rs::http_client::RequestError code;
-    std::string message;
 };
 
 /**
