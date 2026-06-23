@@ -749,7 +749,12 @@ main(int argc, char* argv[])
                     bench::RunResult r = runCell(transport, isTls, conc, cell);
                     std::cerr << fmtRps(r.throughputRps) << " req/s";
                     if (r.errors)
-                        std::cerr << " (" << r.errors << " errors)";
+                    {
+                        std::cerr << " (" << r.errors << " errors";
+                        if (!r.firstError.empty())
+                            std::cerr << ": " << r.firstError;
+                        std::cerr << ")";
+                    }
                     cellRuns[ci].push_back(std::move(r));
 
                     // Show the running CV so progress toward convergence is visible.
