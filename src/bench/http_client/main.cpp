@@ -8,15 +8,19 @@
 
 #include <boost/program_options.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace po = boost::program_options;
@@ -79,6 +83,22 @@ fmtRps(double rps)
 }
 
 static std::string
+fmtPct(double pct)
+{
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << pct;
+    return oss.str();
+}
+
+// Render a converged throughput as "20100.0 ± 0.83%" — the mean and its
+// coefficient of variation (relative standard deviation) in one figure.
+static std::string
+fmtRpsCv(double rps, double cvPct)
+{
+    return fmtRps(rps) + " ± " + fmtPct(cvPct) + "%";
+}
+
+static std::string
 fmtMB(long bytes)
 {
     std::ostringstream oss;
@@ -94,6 +114,54 @@ cpuMsPerReq(bench::RunResult const& r)
     if (total == 0)
         return 0.0;
     return (r.cpuUserSeconds + r.cpuSysSeconds) * 1000.0 / static_cast<double>(total);
+}
+
+// ---------------------------------------------------------------------------
+// Simple sample statistics over per-iteration throughput.
+// ---------------------------------------------------------------------------
+
+static double
+sampleMean(std::vector<double> const& v)
+{
+    if (v.empty())
+        return 0.0;
+    return std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(v.size());
+}
+
+// Sample standard deviation (N-1 / Bessel's correction). Needs >= 2 samples.
+static double
+sampleStdDev(std::vector<double> const& v)
+{
+    if (v.size() < 2)
+        return 0.0;
+    double const m = sampleMean(v);
+    double acc = 0.0;
+    for (double const x : v)
+        acc += (x - m) * (x - m);
+    return std::sqrt(acc / static_cast<double>(v.size() - 1));
+}
+
+// Coefficient of variation (relative standard deviation) in percent. This is
+// the convergence metric: "1% standard deviation" => CV% <= 1.0.
+static double
+cvPct(std::vector<double> const& v)
+{
+    double const m = sampleMean(v);
+    if (m == 0.0)
+        return 0.0;
+    return sampleStdDev(v) / m * 100.0;
+}
+
+// Relative standard error of the mean, in percent (reported for context).
+static double
+relStdErrPct(std::vector<double> const& v)
+{
+    if (v.size() < 2)
+        return 0.0;
+    double const m = sampleMean(v);
+    if (m == 0.0)
+        return 0.0;
+    return (sampleStdDev(v) / std::sqrt(static_cast<double>(v.size()))) / m * 100.0;
 }
 
 // Markdown table row helper (pipes are caller-supplied separators).
@@ -118,16 +186,96 @@ tableHeader(std::vector<std::string> const& cols)
 }
 
 // ---------------------------------------------------------------------------
-// Report generation
+// One cell of the comparison (a client configuration run once per iteration).
+// ---------------------------------------------------------------------------
+
+struct CellSpec
+{
+    std::string label;                  // shown in the report
+    bench::ClientKind client;
+    bool disableReuse = false;          // Rust only: connection pooling off
+    bool requestConnectionClose = false;  // Rust only: send `Connection: close`
+};
+
+// ---------------------------------------------------------------------------
+// Aggregated record for one (transport, concurrency, cell), pooled over all
+// iterations of the convergence loop.
 // ---------------------------------------------------------------------------
 
 struct RunRecord
 {
     std::string transport;   // "http" or "https"
-    unsigned concurrency;
+    unsigned concurrency = 0;
     std::string label;       // "Legacy", "Rust(reuse-on)", "Rust(forced-close)"
-    bench::RunResult result;
+    bench::RunResult result; // aggregated across iterations (mean throughput, etc.)
+    unsigned iterations = 0;
+    double throughputCvPct = 0.0;       // coefficient of variation of throughput
+    double throughputRelStdErrPct = 0.0;
+    bool converged = false;  // CV% reached the target within the iteration cap
 };
+
+// Aggregate the per-iteration RunResults for a single cell into one RunRecord.
+//   - throughput  -> mean of per-iteration throughput (the converged figure)
+//   - latencies   -> mean of per-iteration percentiles
+//   - ok/errors   -> summed (so CPU ms/req = total CPU / total requests)
+//   - CPU seconds -> summed
+//   - peak RSS    -> max across iterations
+static RunRecord
+aggregate(
+    std::string const& transport,
+    unsigned concurrency,
+    std::string const& label,
+    std::vector<bench::RunResult> const& runs,
+    double targetCvPct,
+    unsigned minIterations)
+{
+    RunRecord rec;
+    rec.transport = transport;
+    rec.concurrency = concurrency;
+    rec.label = label;
+    rec.iterations = static_cast<unsigned>(runs.size());
+
+    std::vector<double> tput;
+    tput.reserve(runs.size());
+
+    bench::RunResult agg;
+    double sumP50 = 0, sumP90 = 0, sumP99 = 0, sumMax = 0, sumMean = 0;
+    for (auto const& r : runs)
+    {
+        tput.push_back(r.throughputRps);
+        agg.ok += r.ok;
+        agg.errors += r.errors;
+        agg.wallSeconds += r.wallSeconds;
+        agg.cpuUserSeconds += r.cpuUserSeconds;
+        agg.cpuSysSeconds += r.cpuSysSeconds;
+        agg.peakRssBytes = std::max(agg.peakRssBytes, r.peakRssBytes);
+        sumP50 += r.p50Ms;
+        sumP90 += r.p90Ms;
+        sumP99 += r.p99Ms;
+        sumMax += r.maxMs;
+        sumMean += r.meanMs;
+        if (agg.firstError.empty() && !r.firstError.empty())
+            agg.firstError = r.firstError;
+    }
+
+    double const n = runs.empty() ? 1.0 : static_cast<double>(runs.size());
+    agg.throughputRps = sampleMean(tput);
+    agg.p50Ms = sumP50 / n;
+    agg.p90Ms = sumP90 / n;
+    agg.p99Ms = sumP99 / n;
+    agg.maxMs = sumMax / n;
+    agg.meanMs = sumMean / n;
+
+    rec.result = std::move(agg);
+    rec.throughputCvPct = cvPct(tput);
+    rec.throughputRelStdErrPct = relStdErrPct(tput);
+    rec.converged = (rec.iterations >= minIterations) && (rec.throughputCvPct <= targetCvPct);
+    return rec;
+}
+
+// ---------------------------------------------------------------------------
+// Report generation
+// ---------------------------------------------------------------------------
 
 static void
 writeReport(
@@ -135,6 +283,10 @@ writeReport(
     std::vector<RunRecord> const& records,
     unsigned requests,
     unsigned warmup,
+    unsigned waitSeconds,
+    double targetCvPct,
+    unsigned minIterations,
+    unsigned maxIterations,
     std::size_t responseSize,
     std::vector<std::string> const& transports,
     unsigned serverThreads,
@@ -151,8 +303,11 @@ writeReport(
     out << "## Setup\n\n";
     out << "| Parameter | Value |\n";
     out << "|---|---|\n";
-    out << "| Measured requests | " << requests << " |\n";
-    out << "| Warmup requests | " << warmup << " |\n";
+    out << "| Requests per iteration (per client) | " << requests << " |\n";
+    out << "| Warmup requests (per iteration, per client) | " << warmup << " |\n";
+    out << "| Inter-batch wait | " << waitSeconds << " s (lets TIME_WAIT sockets drain) |\n";
+    out << "| Convergence target | throughput CV <= " << fmtPct(targetCvPct) << " % |\n";
+    out << "| Iterations per level | min " << minIterations << ", max " << maxIterations << " |\n";
     out << "| Response body size | " << responseSize << " bytes |\n";
     out << "| Transports | ";
     for (std::size_t i = 0; i < transports.size(); ++i)
@@ -170,6 +325,28 @@ writeReport(
     out << "| TLS verify | " << (tlsVerify ? "yes" : "no") << " |\n";
     out << "| Machine | " << "loopback (in-process server + client)" << " |\n";
     out << "\n";
+
+    // Methodology
+    out << "## Methodology\n\n";
+    out << "Each concurrency level is measured in repeated **batches**. One batch runs every "
+           "client cell once, back to back, for `"
+        << requests << "` requests each (C++ legacy first, then the Rust cells). After each "
+           "batch the driver sleeps `"
+        << waitSeconds << "`s so the kernel can reclaim the sockets left in TIME_WAIT before "
+           "the next batch opens new ones. On loopback every fresh-connection request consumes "
+           "2 sockets (client + server endpoint), and a batch runs 3 cells of `"
+        << requests << "` requests, so a batch uses up to 2 x 3 x " << requests << " = "
+        << (6 * requests) << " sockets — at the 10k default that is ~60k, right at the ceiling. "
+           "Without the wait a long sweep exhausts the socket / ephemeral-port range (~60k) and "
+           "ends up measuring socket-reclaim speed rather than client throughput.\n\n";
+    out << "Per-batch throughput is collected as a sample. Batches repeat until the throughput "
+           "coefficient of variation (std-dev / mean) for **every** cell is <= "
+        << fmtPct(targetCvPct) << "% (with at least " << minIterations
+        << " samples), or until " << maxIterations
+        << " batches have run. Reported throughput is the mean over those batches expressed as "
+           "`mean ± CV` (one relative standard deviation), so a converged row reads e.g. "
+           "`20100.0 ± 0.83%`; latency percentiles are the per-batch mean; errors and CPU are "
+           "summed; peak RSS is the max.\n\n";
 
     // Cells explanation
     out << "## Cells\n\n";
@@ -190,7 +367,7 @@ writeReport(
         out << "## Results — " << transport << "\n\n";
 
         std::vector<std::string> cols = {
-            "Concurrency", "Client", "Throughput (req/s)",
+            "Concurrency", "Client", "Iters", "Throughput (req/s ± CV)",
             "p50 (ms)", "p90 (ms)", "p99 (ms)", "max (ms)",
             "CPU ms/req", "Peak RSS (MB)", "Errors", "Notes"
         };
@@ -203,13 +380,16 @@ writeReport(
 
             auto const& r = rec.result;
             std::string notes;
+            if (!rec.converged)
+                notes = "did not converge";
             if (!r.firstError.empty())
-                notes = r.firstError;
+                notes += (notes.empty() ? "" : "; ") + r.firstError;
 
             out << tableRow({
                 std::to_string(rec.concurrency),
                 rec.label,
-                fmtRps(r.throughputRps),
+                std::to_string(rec.iterations),
+                fmtRpsCv(r.throughputRps, rec.throughputCvPct),
                 fmtMs(r.p50Ms),
                 fmtMs(r.p90Ms),
                 fmtMs(r.p99Ms),
@@ -276,14 +456,18 @@ writeReport(
            "both clients may experience scheduler interference.\n";
     out << "- **Legacy is GET with Connection: close**: the legacy client always negotiates "
            "a fresh connection per request regardless of transport.\n";
-    out << "- **Warmup excluded**: the first " << warmup << " requests are unmeasured "
-           "and excluded from all statistics.\n";
-    out << "- **Fresh server per run**: every run spins up its own BenchServer on a new "
-           "ephemeral port, so each gets an isolated TCP 4-tuple space + fresh server threads "
-           "and a prior run's TIME_WAIT sockets cannot starve it. A single no-reuse run can "
-           "still exhaust its own port if it churns more connections than the ephemeral range "
-           "holds within one TIME_WAIT window (~60s on Linux); if that happens, the run shows "
-           "timeout errors below.\n";
+    out << "- **Warmup excluded**: the first " << warmup << " requests of each batch are "
+           "unmeasured and excluded from all statistics.\n";
+    out << "- **Socket-drain wait**: each concurrency level runs repeated batches of "
+        << requests << " requests per client with a " << waitSeconds << "s pause between "
+           "batches so TIME_WAIT sockets are reclaimed; this keeps the benchmark from measuring "
+           "socket-reclaim speed once a long sweep would otherwise exhaust ephemeral ports.\n";
+    out << "- **Convergence**: batches repeat until throughput CV <= " << fmtPct(targetCvPct)
+        << "% for every cell (>= " << minIterations << " samples) or " << maxIterations
+        << " batches elapse. Rows that hit the cap first are flagged \"did not converge\" in "
+           "Notes; reported throughput is still the mean of the batches taken.\n";
+    out << "- **Fresh server per batch**: every cell run spins up its own BenchServer on a new "
+           "ephemeral port, so each gets an isolated TCP 4-tuple space + fresh server threads.\n";
     out << "- **Driver watchdog**: each request has a backstop deadline; a request that "
            "doesn't complete in time is recorded as a timeout error and the loop proceeds "
            "(rather than hanging). Watchdog timeouts appear in the Errors column.\n";
@@ -312,11 +496,19 @@ main(int argc, char* argv[])
     desc.add_options()
         ("help,h",                                                      "show help")
         ("requests",         po::value<unsigned>()->default_value(10000),
-                             "measured requests per run")
-        ("warmup",           po::value<unsigned>()->default_value(1000),
-                             "unmeasured warmup requests per run")
+                             "measured requests per iteration, per client")
+        ("warmup",           po::value<unsigned>()->default_value(0),
+                             "unmeasured warmup requests per iteration, per client")
         ("concurrency",      po::value<std::string>()->default_value("8,64"),
                              "comma-separated concurrency levels to sweep")
+        ("wait-seconds",     po::value<unsigned>()->default_value(70),
+                             "seconds to wait between batches for sockets to free")
+        ("target-cv",        po::value<double>()->default_value(1.0),
+                             "stop a level once throughput CV (std-dev/mean, %) is at or below this")
+        ("min-iterations",   po::value<unsigned>()->default_value(3),
+                             "minimum batches per concurrency level before convergence can trigger")
+        ("max-iterations",   po::value<unsigned>()->default_value(50),
+                             "maximum batches per concurrency level (safety cap)")
         ("response-size",    po::value<std::size_t>()->default_value(1024),
                              "server response body size in bytes")
         ("transport",        po::value<std::string>()->default_value("both"),
@@ -360,6 +552,10 @@ main(int argc, char* argv[])
     unsigned const requests          = vm["requests"].as<unsigned>();
     unsigned const warmup            = vm["warmup"].as<unsigned>();
     std::string const concurrencyStr = vm["concurrency"].as<std::string>();
+    unsigned const waitSeconds       = vm["wait-seconds"].as<unsigned>();
+    double const targetCvPct         = vm["target-cv"].as<double>();
+    unsigned minIterations           = vm["min-iterations"].as<unsigned>();
+    unsigned maxIterations           = vm["max-iterations"].as<unsigned>();
     std::size_t const responseSize   = vm["response-size"].as<std::size_t>();
     std::string const transportStr   = vm["transport"].as<std::string>();
     unsigned const serverThreads     = vm["server-threads"].as<unsigned>();
@@ -370,6 +566,11 @@ main(int argc, char* argv[])
     unsigned const timeoutSec        = vm["timeout-seconds"].as<unsigned>();
     std::size_t const maxRespBytes   = vm["max-response-bytes"].as<std::size_t>();
     std::string const outPath        = vm["out"].as<std::string>();
+
+    // A coefficient of variation needs >= 2 samples; clamp so convergence is
+    // meaningful and the cap can never sit below the floor.
+    minIterations = std::max(2u, minIterations);
+    maxIterations = std::max(minIterations, maxIterations);
 
     // Validate / parse transport
     bool const doHttp  = (transportStr == "http"  || transportStr == "both");
@@ -401,9 +602,9 @@ main(int argc, char* argv[])
 
     std::string const timestamp = nowIso();
 
-    // A fresh BenchServer is created per run inside the loop below (see "test
-    // case" scoping there), so each run gets its own ephemeral port + server
-    // threads. `enableTls` only gates whether https runs happen.
+    // A fresh BenchServer is created per cell run inside the loop below, so each
+    // run gets its own ephemeral port + server threads. `enableTls` only gates
+    // whether https runs happen.
 
     // --- Materialize embedded CA cert to a temp file (if TLS verify requested) ---
     std::filesystem::path caTempPath;
@@ -452,19 +653,6 @@ main(int argc, char* argv[])
 
     std::vector<RunRecord> allRecords;
 
-    auto const runLabel = [&](
-        std::string const& transport,
-        unsigned conc,
-        std::string const& label,
-        bench::RunConfig const& cfg)
-    {
-        std::cerr << "running " << transport << " c=" << conc << " " << label << "...\n";
-        bench::RunResult result = (cfg.client == bench::ClientKind::Legacy)
-            ? bench::runLegacy(cfg)
-            : bench::runRust(cfg);
-        allRecords.push_back({transport, conc, label, std::move(result)});
-    };
-
     auto const initRustTls = [&](bool disableReuse)
     {
         ::rs::http_client::reset_tls_context();
@@ -483,8 +671,52 @@ main(int argc, char* argv[])
         }
     };
 
-    auto const timeout = std::chrono::milliseconds(
-        static_cast<std::chrono::milliseconds::rep>(timeoutSec) * 1000);
+    // Run a single cell once: spin up a fresh server, drive `requests` requests,
+    // and return the measured result.
+    auto const runCell = [&](std::string const& transport, bool isTls, unsigned conc,
+                             CellSpec const& cell) -> bench::RunResult
+    {
+        if (cell.client == bench::ClientKind::Rust)
+            initRustTls(cell.disableReuse);
+
+        bench::BenchServer server(serverThreads, responseSize, isTls);
+        bench::RunConfig cfg;
+        cfg.client                 = cell.client;
+        cfg.tls                    = isTls;
+        cfg.host                   = "127.0.0.1";
+        cfg.port                   = server.port();
+        cfg.path                   = "/bench";
+        cfg.maxResponseBytes       = maxRespBytes;
+        cfg.totalRequests          = requests;
+        cfg.warmupRequests         = warmup;
+        cfg.concurrency            = conc;
+        cfg.ioThreads              = (cell.client == bench::ClientKind::Legacy)
+            ? legacyThreads : tokioThreads;
+        cfg.controlThreads         = controlThreads;
+        cfg.timeout                = std::chrono::milliseconds(
+            static_cast<std::chrono::milliseconds::rep>(timeoutSec) * 1000);
+        cfg.requestConnectionClose = cell.requestConnectionClose;
+
+        return (cell.client == bench::ClientKind::Legacy)
+            ? bench::runLegacy(cfg)
+            : bench::runRust(cfg);
+    };
+
+    // The cells driven each iteration: C++ legacy first, then the two Rust
+    // cells. On loopback each fresh-connection request consumes 2 sockets
+    // (client + server endpoint), so a batch of 3 cells x `requests` requests
+    // uses up to 6 * requests sockets (~60k at the 10k default) before the
+    // inter-batch wait reclaims them.
+    std::vector<CellSpec> const cells = {
+        {"Legacy",             bench::ClientKind::Legacy, /*disableReuse=*/false, /*close=*/false},
+        {"Rust(reuse-on)",     bench::ClientKind::Rust,   /*disableReuse=*/false, /*close=*/false},
+        {"Rust(forced-close)", bench::ClientKind::Rust,   /*disableReuse=*/true,  /*close=*/true},
+    };
+
+    // First batch overall runs immediately; every subsequent batch (including
+    // the first batch of a new concurrency level / transport) waits first, so
+    // TIME_WAIT sockets from the previous batch have drained.
+    bool firstBatch = true;
 
     for (auto const& transport : activeTransports)
     {
@@ -492,68 +724,84 @@ main(int argc, char* argv[])
 
         for (unsigned conc : concLevels)
         {
-            // Each run ("test case") spins up its own BenchServer on a fresh
-            // ephemeral port, so it gets an isolated TCP 4-tuple space and fresh
-            // server threads — nothing carries over from the previous run.
+            // Per-cell throughput samples, accumulated across batches.
+            std::vector<std::vector<bench::RunResult>> cellRuns(cells.size());
+            unsigned iteration = 0;
 
-            // --- Legacy ---
+            while (true)
             {
-                bench::BenchServer server(serverThreads, responseSize, isTls);
-                bench::RunConfig cfg;
-                cfg.client           = bench::ClientKind::Legacy;
-                cfg.tls              = isTls;
-                cfg.host             = "127.0.0.1";
-                cfg.port             = server.port();
-                cfg.path             = "/bench";
-                cfg.maxResponseBytes = maxRespBytes;
-                cfg.totalRequests    = requests;
-                cfg.warmupRequests   = warmup;
-                cfg.concurrency      = conc;
-                cfg.ioThreads        = legacyThreads;
-                cfg.controlThreads   = controlThreads;
-                cfg.timeout          = timeout;
-                runLabel(transport, conc, "Legacy", cfg);
+                if (!firstBatch)
+                {
+                    std::cerr << "waiting " << waitSeconds
+                              << "s for sockets to free...\n";
+                    std::this_thread::sleep_for(std::chrono::seconds(waitSeconds));
+                }
+                firstBatch = false;
+
+                ++iteration;
+                std::cerr << "=== " << transport << " c=" << conc
+                          << " batch " << iteration << " ===\n";
+
+                for (std::size_t ci = 0; ci < cells.size(); ++ci)
+                {
+                    auto const& cell = cells[ci];
+                    std::cerr << "  " << cell.label << " ... " << std::flush;
+                    bench::RunResult r = runCell(transport, isTls, conc, cell);
+                    std::cerr << fmtRps(r.throughputRps) << " req/s";
+                    if (r.errors)
+                        std::cerr << " (" << r.errors << " errors)";
+                    cellRuns[ci].push_back(std::move(r));
+
+                    // Show the running CV so progress toward convergence is visible.
+                    std::vector<double> t;
+                    for (auto const& rr : cellRuns[ci])
+                        t.push_back(rr.throughputRps);
+                    if (t.size() >= 2)
+                        std::cerr << "  [CV " << fmtPct(cvPct(t)) << "%]";
+                    std::cerr << "\n";
+                }
+
+                // Converged once every cell's throughput CV is at or below the
+                // target (with enough samples). Otherwise loop until the cap.
+                bool allConverged = (iteration >= minIterations);
+                if (allConverged)
+                {
+                    for (auto const& runs : cellRuns)
+                    {
+                        std::vector<double> t;
+                        for (auto const& rr : runs)
+                            t.push_back(rr.throughputRps);
+                        if (cvPct(t) > targetCvPct)
+                        {
+                            allConverged = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (allConverged)
+                {
+                    std::cerr << "converged after " << iteration << " batches\n";
+                    break;
+                }
+                if (iteration >= maxIterations)
+                {
+                    std::cerr << "reached max " << maxIterations
+                              << " batches without converging\n";
+                    break;
+                }
             }
 
-            // --- Rust Cell A: reuse on ---
+            for (std::size_t ci = 0; ci < cells.size(); ++ci)
             {
-                initRustTls(/*disableReuse=*/false);
-                bench::BenchServer server(serverThreads, responseSize, isTls);
-                bench::RunConfig cfg;
-                cfg.client           = bench::ClientKind::Rust;
-                cfg.tls              = isTls;
-                cfg.host             = "127.0.0.1";
-                cfg.port             = server.port();
-                cfg.path             = "/bench";
-                cfg.maxResponseBytes = maxRespBytes;
-                cfg.totalRequests    = requests;
-                cfg.warmupRequests   = warmup;
-                cfg.concurrency      = conc;
-                cfg.ioThreads        = tokioThreads;
-                cfg.controlThreads   = controlThreads;
-                cfg.timeout          = timeout;
-                runLabel(transport, conc, "Rust(reuse-on)", cfg);
-            }
-
-            // --- Rust Cell B: forced close ---
-            {
-                initRustTls(/*disableReuse=*/true);
-                bench::BenchServer server(serverThreads, responseSize, isTls);
-                bench::RunConfig cfg;
-                cfg.client           = bench::ClientKind::Rust;
-                cfg.tls              = isTls;
-                cfg.host             = "127.0.0.1";
-                cfg.port             = server.port();
-                cfg.path             = "/bench";
-                cfg.maxResponseBytes = maxRespBytes;
-                cfg.totalRequests    = requests;
-                cfg.warmupRequests   = warmup;
-                cfg.concurrency      = conc;
-                cfg.ioThreads        = tokioThreads;
-                cfg.controlThreads   = controlThreads;
-                cfg.timeout          = timeout;
-                cfg.requestConnectionClose = true;
-                runLabel(transport, conc, "Rust(forced-close)", cfg);
+                RunRecord rec = aggregate(
+                    transport, conc, cells[ci].label, cellRuns[ci],
+                    targetCvPct, minIterations);
+                std::cerr << "  " << rec.label << ": "
+                          << fmtRpsCv(rec.result.throughputRps, rec.throughputCvPct)
+                          << " over " << rec.iterations << " batches"
+                          << (rec.converged ? "" : " (did not converge)") << "\n";
+                allRecords.push_back(std::move(rec));
             }
         }
     }
@@ -577,6 +825,10 @@ main(int argc, char* argv[])
             allRecords,
             requests,
             warmup,
+            waitSeconds,
+            targetCvPct,
+            minIterations,
+            maxIterations,
             responseSize,
             activeTransports,
             serverThreads,
