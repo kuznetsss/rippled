@@ -134,9 +134,17 @@ public:
         request(
             bSSL,
             deqSites,
+            // Bind the request builder to a raw `this`, NOT shared_from_this().
+            // The bound functor is stored in the `build_` member, so capturing a
+            // shared_ptr here would make the object own a strong reference to
+            // itself -- a cycle that prevents HTTPClientImp from ever being
+            // destroyed, which in turn means its socket is never closed (it
+            // leaks in CLOSE_WAIT, one fd per request). `build_` is only ever
+            // invoked synchronously from handleRequest while an async handler
+            // still holds a shared_from_this ref, so `this` is always valid.
             std::bind(
                 &HTTPClientImp::makeGet,
-                shared_from_this(),
+                this,
                 strPath,
                 std::placeholders::_1,
                 std::placeholders::_2),
