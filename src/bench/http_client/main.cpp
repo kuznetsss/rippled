@@ -20,7 +20,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace po = boost::program_options;
@@ -45,6 +47,44 @@ parseConcurrencyList(std::string const& s)
     if (result.empty())
         throw std::runtime_error("--concurrency must be a non-empty comma-separated list");
     return result;
+}
+
+// The typical request header set, mirroring the heaviest real call in the tree
+// (the JSON-RPC POST built by createHTTPPost in RPCCall.cpp). `Host` and
+// `Content-Length` are deliberately omitted: the legacy raw builder writes them
+// itself and reqwest derives them from the URL/body, so listing them here would
+// double them up on the Rust path.
+static std::vector<std::pair<std::string, std::string>> const&
+typicalRequestHeaders()
+{
+    static std::vector<std::pair<std::string, std::string>> const headers = {
+        {"User-Agent", "rippled-json-rpc/v1"},
+        {"Content-Type", "application/json"},
+        {"Accept", "application/json"},
+    };
+    return headers;
+}
+
+// Build a request body of exactly `size` bytes shaped like a JSON-RPC submit
+// payload, so `Content-Type: application/json` is honest. A size of 0 yields no
+// body (the request stays a bodyless GET); sizes too small to hold the JSON
+// envelope fall back to raw filler bytes.
+static std::string
+makeRequestBody(std::size_t size)
+{
+    if (size == 0)
+        return {};
+    static constexpr std::string_view prefix =
+        R"({"method":"submit","params":[{"tx_blob":")";
+    static constexpr std::string_view suffix = R"("}],"id":1})";
+    if (size <= prefix.size() + suffix.size())
+        return std::string(size, 'A');
+    std::string body;
+    body.reserve(size);
+    body.append(prefix);
+    body.append(size - prefix.size() - suffix.size(), 'A');
+    body.append(suffix);
+    return body;
 }
 
 static std::string
@@ -288,6 +328,7 @@ writeReport(
     unsigned minIterations,
     unsigned maxIterations,
     std::size_t responseSize,
+    std::size_t requestBodySize,
     std::vector<std::string> const& transports,
     unsigned serverThreads,
     unsigned legacyThreads,
@@ -308,7 +349,23 @@ writeReport(
     out << "| Inter-batch wait | " << waitSeconds << " s (lets TIME_WAIT sockets drain) |\n";
     out << "| Convergence target | throughput CV <= " << fmtPct(targetCvPct) << " % |\n";
     out << "| Iterations per level | min " << minIterations << ", max " << maxIterations << " |\n";
+    out << "| Request method | " << (requestBodySize ? "POST" : "GET") << " |\n";
+    out << "| Request body size | " << requestBodySize << " bytes |\n";
+    if (requestBodySize)
+    {
+        out << "| Request headers | ";
+        auto const& hdrs = typicalRequestHeaders();
+        for (std::size_t i = 0; i < hdrs.size(); ++i)
+        {
+            if (i > 0)
+                out << ", ";
+            out << hdrs[i].first << ": " << hdrs[i].second;
+        }
+        out << " (plus Host + Content-Length per transport) |\n";
+    }
     out << "| Response body size | " << responseSize << " bytes |\n";
+    out << "| Response headers | Server, Date, Content-Type, Cache-Control, Vary "
+           "(plus Content-Length + Connection) |\n";
     out << "| Transports | ";
     for (std::size_t i = 0; i < transports.size(); ++i)
     {
@@ -350,8 +407,9 @@ writeReport(
 
     // Cells explanation
     out << "## Cells\n\n";
-    out << "- **Legacy** — `xrpl::HTTPClient::get` with `Connection: close`; "
-           "always pays a fresh TCP connection (and TLS handshake) per request.\n";
+    out << "- **Legacy** — `xrpl::HTTPClient::request` issuing the same POST "
+           "(typical headers + body) with `Connection: close`; always pays a "
+           "fresh TCP connection (and TLS handshake) per request.\n";
     out << "- **Rust(reuse-on)** (Cell A) — `reqwest` with default connection pooling / keep-alive. "
            "After the first request the TCP connection (and TLS session) is reused.\n";
     out << "- **Rust(forced-close)** (Cell B) — `reqwest` with `disable_connection_reuse=true` "
@@ -454,8 +512,9 @@ writeReport(
            "so the legacy-vs-Rust *delta* remains meaningful.\n";
     out << "- **No core pinning**: macOS does not expose `pthread_setaffinity_np`; "
            "both clients may experience scheduler interference.\n";
-    out << "- **Legacy is GET with Connection: close**: the legacy client always negotiates "
-           "a fresh connection per request regardless of transport.\n";
+    out << "- **Legacy is POST with Connection: close**: the legacy client always negotiates "
+           "a fresh connection per request regardless of transport. The request carries the "
+           "same typical headers and body as the Rust cells.\n";
     out << "- **Warmup excluded**: the first " << warmup << " requests of each batch are "
            "unmeasured and excluded from all statistics.\n";
     out << "- **Socket-drain wait**: each concurrency level runs repeated batches of "
@@ -509,8 +568,11 @@ main(int argc, char* argv[])
                              "minimum batches per concurrency level before convergence can trigger")
         ("max-iterations",   po::value<unsigned>()->default_value(50),
                              "maximum batches per concurrency level (safety cap)")
-        ("response-size",    po::value<std::size_t>()->default_value(1024),
+        ("response-size",    po::value<std::size_t>()->default_value(5 * 1024),
                              "server response body size in bytes")
+        ("request-body-size", po::value<std::size_t>()->default_value(5 * 1024),
+                             "request body size in bytes, sent as a POST with typical "
+                             "headers (0 => bodyless GET with no extra headers)")
         ("transport",        po::value<std::string>()->default_value("both"),
                              "http | https | both")
         ("server-threads",   po::value<unsigned>()->default_value(8),
@@ -557,6 +619,7 @@ main(int argc, char* argv[])
     unsigned minIterations           = vm["min-iterations"].as<unsigned>();
     unsigned maxIterations           = vm["max-iterations"].as<unsigned>();
     std::size_t const responseSize   = vm["response-size"].as<std::size_t>();
+    std::size_t const requestBodySize = vm["request-body-size"].as<std::size_t>();
     std::string const transportStr   = vm["transport"].as<std::string>();
     unsigned const serverThreads     = vm["server-threads"].as<unsigned>();
     unsigned const legacyThreads     = vm["legacy-threads"].as<unsigned>();
@@ -671,6 +734,11 @@ main(int argc, char* argv[])
         }
     };
 
+    // The request payload shared by every cell: a body of `requestBodySize`
+    // bytes plus the typical header set, so all three cells send the same
+    // realistic POST (or a bodyless GET when --request-body-size 0).
+    std::string const requestBody = makeRequestBody(requestBodySize);
+
     // Run a single cell once: spin up a fresh server, drive `requests` requests,
     // and return the measured result.
     auto const runCell = [&](std::string const& transport, bool isTls, unsigned conc,
@@ -696,6 +764,9 @@ main(int argc, char* argv[])
         cfg.timeout                = std::chrono::milliseconds(
             static_cast<std::chrono::milliseconds::rep>(timeoutSec) * 1000);
         cfg.requestConnectionClose = cell.requestConnectionClose;
+        cfg.requestBody            = requestBody;
+        if (!requestBody.empty())
+            cfg.requestHeaders = typicalRequestHeaders();
 
         return (cell.client == bench::ClientKind::Legacy)
             ? bench::runLegacy(cfg)
@@ -835,6 +906,7 @@ main(int argc, char* argv[])
             minIterations,
             maxIterations,
             responseSize,
+            requestBodySize,
             activeTransports,
             serverThreads,
             legacyThreads,

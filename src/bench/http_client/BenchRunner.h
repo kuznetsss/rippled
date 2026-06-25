@@ -15,13 +15,16 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <expected>
 #include <functional>
 #include <mutex>
 #include <numeric>
+#include <ostream>
 #include <string>
 #include <sys/resource.h>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace bench {
@@ -58,6 +61,14 @@ struct RunConfig
     // than exhausting the client's ephemeral ports on loopback. Ignored by the
     // legacy path, which always sends `Connection: close`.
     bool requestConnectionClose = false;
+    // Typical request payload, mirroring the heaviest real call (the JSON-RPC
+    // POST built in RPCCall.cpp): the app-level header set (e.g. User-Agent /
+    // Content-Type / Accept) plus a body. `Host` and `Content-Length` are NOT
+    // listed here — they are added per-transport (written by the legacy raw
+    // builder, computed by reqwest). When `requestBody` is non-empty the request
+    // is issued as POST; otherwise it stays a bodyless GET.
+    std::vector<std::pair<std::string, std::string>> requestHeaders;
+    std::string requestBody;
 };
 
 struct RunResult
@@ -226,12 +237,28 @@ runLegacyPhase(
                 recordResult(false, "request timed out (driver watchdog)", ms);
             });
 
-        xrpl::HTTPClient::get(
+        xrpl::HTTPClient::request(
             cfg.tls,
             netIoc,
             cfg.host,
             cfg.port,
-            cfg.path,
+            [&cfg](boost::asio::streambuf& sb, std::string const& strHost)
+            {
+                // Mirror the JSON-RPC client's request (RPCCall.cpp): a POST
+                // carrying the full typical header set plus a body. The legacy
+                // client has no keep-alive, so it always sends `Connection:
+                // close` and pays a fresh connection per request. `Host` and
+                // `Content-Length` are written here; the rest come from cfg.
+                std::ostream os(&sb);
+                os << "POST " << (cfg.path.empty() ? "/" : cfg.path)
+                   << " HTTP/1.0\r\n"
+                   << "Host: " << strHost << ":" << cfg.port << "\r\n";
+                for (auto const& [k, v] : cfg.requestHeaders)
+                    os << k << ": " << v << "\r\n";
+                os << "Content-Length: " << cfg.requestBody.size() << "\r\n"
+                   << "Connection: close\r\n\r\n"
+                   << cfg.requestBody;
+            },
             cfg.maxResponseBytes,
             timeoutSec,
             [&recordResult, &controlIoc, settled, timer, start](
@@ -379,10 +406,21 @@ runRustPhase(
         // return HTTPRequestBuilder& (not a new builder), and asyncSubmit
         // moves the builder's internal state, so re-using a builder after
         // asyncSubmit is undefined behaviour.
-        xrpl::HTTPRequestBuilder builder(url, ::rs::http_client::HTTPMethod::Get, cfg.timeout);
+        // POST when there is a body, otherwise a bodyless GET — matching the
+        // legacy path. reqwest adds `Host` (from the URL) and `Content-Length`
+        // (from the body) itself, so we only add the app-level headers.
+        auto const method = cfg.requestBody.empty()
+            ? ::rs::http_client::HTTPMethod::Get
+            : ::rs::http_client::HTTPMethod::Post;
+        xrpl::HTTPRequestBuilder builder(url, method, cfg.timeout);
         builder.setMaxResponseSize(cfg.maxResponseBytes);
+        for (auto const& [k, v] : cfg.requestHeaders)
+            builder.addHeader(k, v);
         if (cfg.requestConnectionClose)
             builder.addHeader("connection", "close");
+        if (!cfg.requestBody.empty())
+            builder.setBody(
+                std::vector<uint8_t>(cfg.requestBody.begin(), cfg.requestBody.end()));
         builder.asyncSubmit(
             ioc.get_executor(),
             [&recordResult, settled, timer, start](

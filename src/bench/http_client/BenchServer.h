@@ -181,8 +181,15 @@ private:
             co_await http::async_read(stream, buffer, req, net::use_awaitable);
 
             http::response<http::string_body> res{http::status::ok, req.version()};
-            res.set(http::field::server, "bench");
-            res.set(http::field::content_type, "application/octet-stream");
+            // A typical response header set (Content-Length is added by
+            // prepare_payload(); Connection by keep_alive()). The fixed Date is
+            // fine for a loopback benchmark — what matters is the header bytes
+            // on the wire, not the value.
+            res.set(http::field::server, "rippled-bench");
+            res.set(http::field::date, "Thu, 25 Jun 2026 00:00:00 GMT");
+            res.set(http::field::content_type, "application/json");
+            res.set(http::field::cache_control, "no-store");
+            res.set(http::field::vary, "Accept-Encoding");
             res.keep_alive(req.keep_alive());
             res.body() = body_;
             res.prepare_payload();
