@@ -143,3 +143,8 @@ if(tests)
     include(CTest)
     add_subdirectory(src/tests/libxrpl)
 endif()
+
+option(bench "Build micro-benchmarks (pulls aws-lc via FetchContent)" FALSE)
+if(bench)
+    add_subdirectory(bench)
+endif()
