@@ -131,6 +131,7 @@ enum TEMcodes : TERUnderlyingType {
     temINVALID_INNER_BATCH,
     temBAD_MPT,
     temBAD_CIPHERTEXT,
+    temBAD_WASM,
 };
 
 //------------------------------------------------------------------------------
