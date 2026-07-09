@@ -1,0 +1,11 @@
+[package]
+name = "wasm_vm"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+wasmi = "1.1.0"
+cxx.workspace = true

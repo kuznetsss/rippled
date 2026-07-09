@@ -32,3 +32,4 @@ function(add_xrpl_crate name)
 endfunction()
 
 add_xrpl_crate(rs_hello_world CRATE rs_hello_world FILES lib.rs)
+add_xrpl_crate(rs_wasm_vm CRATE wasm_vm FILES ffi.rs)
