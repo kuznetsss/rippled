@@ -12,9 +12,12 @@ crate-type = ["staticlib", "rlib"]
 wasmi = "1.1.0"
 cxx.workspace = true
 host_functions = { path = "../host_functions" }
+# Compiles WebAssembly text (WAT) to wasm bytes. Used by the `compile_wat` cxx
+# bridge helper (a tooling/test convenience) as well as the inline
+# `#[cfg(test)]` tests below.
+wat = "1"
 
 [dev-dependencies]
-# `wat` compiles inline WebAssembly-text test guests to bytes; `sha2` backs the
-# MockHost's sha512_half so the end-to-end test can check a real digest.
-wat = "1"
+# `sha2` backs the MockHost's sha512_half so the end-to-end test can check a
+# real digest.
 sha2 = "0.10"
