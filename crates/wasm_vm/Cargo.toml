@@ -4,8 +4,17 @@ version = "0.1.0"
 edition.workspace = true
 
 [lib]
-crate-type = ["staticlib"]
+# staticlib: linked into rippled by corrosion.
+# rlib: lets `cargo test` build & run the crate's own unit tests.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 wasmi = "1.1.0"
 cxx.workspace = true
+host_functions = { path = "../host_functions" }
+
+[dev-dependencies]
+# `wat` compiles inline WebAssembly-text test guests to bytes; `sha2` backs the
+# MockHost's sha512_half so the end-to-end test can check a real digest.
+wat = "1"
+sha2 = "0.10"

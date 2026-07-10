@@ -1,0 +1,10 @@
+[package]
+name = "host_functions"
+version = "0.1.0"
+edition.workspace = true
+
+# The single source of truth for the host/guest ABI: just the trait, the shared
+# domain types, and the error codes. No dependencies and `no_std` so the same
+# crate can be linked by the native host (std), the cxx-forwarding host, and the
+# wasm32 guest `stdlib`.
+[dependencies]
