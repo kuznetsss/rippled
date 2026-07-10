@@ -15,7 +15,7 @@
 //! Step 2 wires this up against a native `MockHost` (see the tests). The cxx
 //! bridges to C++ come in later steps.
 
-use host_functions::{HostError, HostFunctions};
+use host_functions::{HostError, HostFn, HostFunctions, HostResult, HASH_LEN};
 use wasmi::{Caller, Config, Engine, Extern, Linker, Memory, Module, Store};
 
 mod ffi;
@@ -23,17 +23,6 @@ mod ffi;
 /// Import module namespace the guest imports host functions from
 /// (`(import "host" "ldgr_index" ...)`).
 const HOST_MODULE: &str = "host";
-
-/// Per-call gas cost for each host function, mirroring the values registered in
-/// `src/libxrpl/tx/wasm/WasmVM.cpp`. Keeping them here is the concrete form of
-/// "gas accounting moves into the Rust engine".
-mod gas {
-    pub const GET_LEDGER_SQN: u64 = 60;
-    pub const GET_CURRENT_LEDGER_OBJ_FIELD: u64 = 70;
-    pub const SHA512_HALF: u64 = 2_000;
-    pub const TRACE: u64 = 500;
-    pub const TRACE_NUM: u64 = 500;
-}
 
 /// State threaded through every host call, stored in the wasmi [`Store`].
 pub struct VmState {
@@ -115,123 +104,203 @@ pub fn run_escrow(
 // Import registration
 // ---------------------------------------------------------------------------
 
-/// Register the PoC's host functions on `linker`. Each closure only adapts wasm
-/// i32/i64 arguments to a typed `hf_*` helper below; the helpers hold the real
-/// logic and are easy to read and (later) test in isolation.
+/// Register the PoC's host functions on `linker`, one per [`HostFn`] variant.
+///
+/// Driven by an exhaustive `match` over [`HostFn::ALL`]: adding a variant to
+/// the ABI won't compile until it has an arm here (that's the "can't forget to
+/// register" guarantee). Each arm charges gas once via [`charged`] — the sole
+/// entry point for `charge` — and marshals its wasm scalars through
+/// [`AbiArg`]/[`AbiRet`] before calling straight into the [`HostFunctions`]
+/// trait object held in the [`Store`].
 fn register_host_functions(linker: &mut Linker<VmState>) -> Result<(), String> {
-    let link_err = |e: wasmi::errors::LinkerError| format!("register import: {e}");
+    fn link_err(e: wasmi::errors::LinkerError) -> String {
+        format!("register import: {e}")
+    }
 
-    linker
-        .func_wrap(HOST_MODULE, "ldgr_index", |mut caller: Caller<'_, VmState>| -> i64 {
-            ret64(hf_get_ledger_sqn(&mut caller))
-        })
+    for &op in HostFn::ALL {
+        match op {
+            HostFn::GetLedgerSqn => linker.func_wrap(
+                HOST_MODULE,
+                op.spec().name,
+                |mut caller: Caller<'_, VmState>| -> i64 {
+                    to_wasm_i64(charged(&mut caller, HostFn::GetLedgerSqn, |c| {
+                        let __ret = c.data().host.get_ledger_sqn()?;
+                        <u32 as AbiRet>::write(__ret, c, ())
+                    }))
+                },
+            ),
+            HostFn::GetCurrentLedgerObjField => linker.func_wrap(
+                HOST_MODULE,
+                op.spec().name,
+                |mut caller: Caller<'_, VmState>, field: i32, out_ptr: i32, out_len: i32| -> i32 {
+                    to_wasm_i32(charged(&mut caller, HostFn::GetCurrentLedgerObjField, |c| {
+                        let __ret = c.data().host.get_current_ledger_obj_field(field)?;
+                        <Vec<u8> as AbiRet>::write(__ret, c, (out_ptr, out_len))
+                    }))
+                },
+            ),
+            HostFn::Sha512Half => linker.func_wrap(
+                HOST_MODULE,
+                op.spec().name,
+                |mut caller: Caller<'_, VmState>,
+                 data_ptr: i32,
+                 data_len: i32,
+                 out_ptr: i32,
+                 out_len: i32|
+                 -> i32 {
+                    to_wasm_i32(charged(&mut caller, HostFn::Sha512Half, |c| {
+                        let data = <Vec<u8> as AbiArg>::read(c, (data_ptr, data_len))?;
+                        let __ret = c.data().host.sha512_half(&data)?;
+                        <[u8; HASH_LEN] as AbiRet>::write(__ret, c, (out_ptr, out_len))
+                    }))
+                },
+            ),
+            HostFn::Trace => linker.func_wrap(
+                HOST_MODULE,
+                op.spec().name,
+                |mut caller: Caller<'_, VmState>,
+                 msg_ptr: i32,
+                 msg_len: i32,
+                 data_ptr: i32,
+                 data_len: i32,
+                 as_hex: i32|
+                 -> i32 {
+                    to_wasm_i32(charged(&mut caller, HostFn::Trace, |c| {
+                        let msg = <String as AbiArg>::read(c, (msg_ptr, msg_len))?;
+                        let data = <Vec<u8> as AbiArg>::read(c, (data_ptr, data_len))?;
+                        c.data().host.trace(&msg, &data, as_hex != 0)?;
+                        <() as AbiRet>::write((), c, ())
+                    }))
+                },
+            ),
+            HostFn::TraceNum => linker.func_wrap(
+                HOST_MODULE,
+                op.spec().name,
+                |mut caller: Caller<'_, VmState>, msg_ptr: i32, msg_len: i32, number: i64| -> i32 {
+                    to_wasm_i32(charged(&mut caller, HostFn::TraceNum, |c| {
+                        let msg = <String as AbiArg>::read(c, (msg_ptr, msg_len))?;
+                        let __ret = c.data().host.trace_num(&msg, number)?;
+                        <() as AbiRet>::write(__ret, c, ())
+                    }))
+                },
+            ),
+        }
         .map_err(link_err)?;
-
-    linker
-        .func_wrap(
-            HOST_MODULE,
-            "home_le_field",
-            |mut caller: Caller<'_, VmState>, field: i32, out_ptr: i32, out_len: i32| -> i32 {
-                ret(hf_get_current_ledger_obj_field(&mut caller, field, out_ptr, out_len))
-            },
-        )
-        .map_err(link_err)?;
-
-    linker
-        .func_wrap(
-            HOST_MODULE,
-            "sha512_half",
-            |mut caller: Caller<'_, VmState>, dp: i32, dl: i32, op: i32, ol: i32| -> i32 {
-                ret(hf_sha512_half(&mut caller, dp, dl, op, ol))
-            },
-        )
-        .map_err(link_err)?;
-
-    linker
-        .func_wrap(
-            HOST_MODULE,
-            "trace",
-            |mut caller: Caller<'_, VmState>, mp: i32, ml: i32, dp: i32, dl: i32, hex: i32| -> i32 {
-                ret(hf_trace(&mut caller, mp, ml, dp, dl, hex))
-            },
-        )
-        .map_err(link_err)?;
-
-    linker
-        .func_wrap(
-            HOST_MODULE,
-            "trace_num",
-            |mut caller: Caller<'_, VmState>, mp: i32, ml: i32, n: i64| -> i32 {
-                ret(hf_trace_num(&mut caller, mp, ml, n))
-            },
-        )
-        .map_err(link_err)?;
-
+    }
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Host-function bodies (typed; memory marshaling lives in the slice helpers)
+// ABI marshaling traits: decode a host-function argument from wasm scalars +
+// guest memory (`AbiArg`), encode a result back into guest memory and a wasm
+// return status (`AbiRet`), and a single-point gas-charging wrapper
+// (`charged`) so every registered closure pays for its call exactly once.
 // ---------------------------------------------------------------------------
 
-fn hf_get_ledger_sqn(caller: &mut Caller<'_, VmState>) -> Result<i64, HostError> {
-    charge(caller, gas::GET_LEDGER_SQN)?;
-    Ok(caller.data().host.get_ledger_sqn()? as i64)
+/// Decode one host-function argument from the wasm scalar(s) the guest passed,
+/// reading guest memory for slice/string types. `Raw` is the wasm scalar shape:
+/// `i32`/`i64` for a plain scalar, `(i32, i32)` for a (ptr, len) pair.
+pub trait AbiArg: Sized {
+    type Raw;
+    fn read(caller: &Caller<'_, VmState>, raw: Self::Raw) -> HostResult<Self>;
 }
 
-fn hf_get_current_ledger_obj_field(
-    caller: &mut Caller<'_, VmState>,
-    field_code: i32,
-    out_ptr: i32,
-    out_len: i32,
-) -> Result<i32, HostError> {
-    charge(caller, gas::GET_CURRENT_LEDGER_OBJ_FIELD)?;
-    let mem = memory(caller)?;
-    let bytes = caller.data().host.get_current_ledger_obj_field(field_code)?;
-    write_bytes(caller, &mem, out_ptr, out_len, &bytes)
+impl AbiArg for i32 {
+    type Raw = i32;
+    fn read(_c: &Caller<'_, VmState>, r: i32) -> HostResult<Self> {
+        Ok(r)
+    }
+}
+impl AbiArg for i64 {
+    type Raw = i64;
+    fn read(_c: &Caller<'_, VmState>, r: i64) -> HostResult<Self> {
+        Ok(r)
+    }
+}
+impl AbiArg for bool {
+    type Raw = i32;
+    fn read(_c: &Caller<'_, VmState>, r: i32) -> HostResult<Self> {
+        Ok(r != 0)
+    }
 }
 
-fn hf_sha512_half(
-    caller: &mut Caller<'_, VmState>,
-    data_ptr: i32,
-    data_len: i32,
-    out_ptr: i32,
-    out_len: i32,
-) -> Result<i32, HostError> {
-    charge(caller, gas::SHA512_HALF)?;
-    let mem = memory(caller)?;
-    let input = read_bytes(caller, &mem, data_ptr, data_len)?;
-    let digest = caller.data().host.sha512_half(&input)?;
-    write_bytes(caller, &mem, out_ptr, out_len, &digest)
+impl AbiArg for Vec<u8> {
+    type Raw = (i32, i32);
+    fn read(c: &Caller<'_, VmState>, (ptr, len): (i32, i32)) -> HostResult<Self> {
+        let mem = memory(c)?;
+        read_bytes(c, &mem, ptr, len)
+    }
 }
 
-fn hf_trace(
-    caller: &mut Caller<'_, VmState>,
-    msg_ptr: i32,
-    msg_len: i32,
-    data_ptr: i32,
-    data_len: i32,
-    as_hex: i32,
-) -> Result<i32, HostError> {
-    charge(caller, gas::TRACE)?;
-    let mem = memory(caller)?;
-    let msg = read_str(caller, &mem, msg_ptr, msg_len)?;
-    let data = read_bytes(caller, &mem, data_ptr, data_len)?;
-    caller.data().host.trace(&msg, &data, as_hex != 0)?;
-    Ok(0)
+impl AbiArg for String {
+    type Raw = (i32, i32);
+    fn read(c: &Caller<'_, VmState>, (ptr, len): (i32, i32)) -> HostResult<Self> {
+        let mem = memory(c)?;
+        read_str(c, &mem, ptr, len)
+    }
 }
 
-fn hf_trace_num(
+/// Encode a host-function result: write bytes into the guest output buffer if
+/// the type needs one, and yield the status the wasm fn returns
+/// (>= 0 success — a value or byte count; < 0 a HostError code, via `to_wasm_*`).
+/// `Out` is the extra wasm scalars for output: `()` for scalar/unit returns,
+/// `(i32, i32)` = (out_ptr, out_len) for buffers.
+pub trait AbiRet {
+    type Out;
+    fn write(self, caller: &mut Caller<'_, VmState>, out: Self::Out) -> HostResult<i64>;
+}
+
+impl AbiRet for () {
+    type Out = ();
+    fn write(self, _c: &mut Caller<'_, VmState>, _o: ()) -> HostResult<i64> {
+        Ok(0)
+    }
+}
+impl AbiRet for u32 {
+    type Out = ();
+    fn write(self, _c: &mut Caller<'_, VmState>, _o: ()) -> HostResult<i64> {
+        Ok(self as i64)
+    }
+}
+
+impl AbiRet for Vec<u8> {
+    type Out = (i32, i32);
+    fn write(self, c: &mut Caller<'_, VmState>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
+        let mem = memory(c)?;
+        Ok(write_bytes(c, &mem, ptr, cap, &self)? as i64)
+    }
+}
+
+impl AbiRet for [u8; HASH_LEN] {
+    type Out = (i32, i32);
+    fn write(self, c: &mut Caller<'_, VmState>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
+        let mem = memory(c)?;
+        Ok(write_bytes(c, &mem, ptr, cap, &self)? as i64)
+    }
+}
+
+/// Charge a host call's gas once (from the enum's spec) then run its body.
+/// Because every registered closure goes through here, gas can't be forgotten.
+fn charged(
     caller: &mut Caller<'_, VmState>,
-    msg_ptr: i32,
-    msg_len: i32,
-    number: i64,
-) -> Result<i32, HostError> {
-    charge(caller, gas::TRACE_NUM)?;
-    let mem = memory(caller)?;
-    let msg = read_str(caller, &mem, msg_ptr, msg_len)?;
-    caller.data().host.trace_num(&msg, number)?;
-    Ok(0)
+    op: HostFn,
+    body: impl FnOnce(&mut Caller<'_, VmState>) -> HostResult<i64>,
+) -> HostResult<i64> {
+    charge(caller, op.spec().base_gas)?;
+    body(caller)
+}
+
+fn to_wasm_i32(r: HostResult<i64>) -> i32 {
+    match r {
+        Ok(v) => v as i32,
+        Err(e) => e.code(),
+    }
+}
+fn to_wasm_i64(r: HostResult<i64>) -> i64 {
+    match r {
+        Ok(v) => v,
+        Err(e) => e.code() as i64,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -304,16 +373,6 @@ fn write_bytes<T>(
     mem.write(&mut *caller, dst as usize, src)
         .map_err(|_| HostError::PointerOutOfBounds)?;
     Ok(src.len() as i32)
-}
-
-/// Collapse a host result to the guest-visible `i32` (negative = error code).
-fn ret(r: Result<i32, HostError>) -> i32 {
-    r.unwrap_or_else(|e| e.code())
-}
-
-/// Same, for the one scalar function that returns `i64`.
-fn ret64(r: Result<i64, HostError>) -> i64 {
-    r.unwrap_or_else(|e| e.code() as i64)
 }
 
 // ---------------------------------------------------------------------------

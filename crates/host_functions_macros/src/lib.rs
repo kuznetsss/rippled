@@ -11,20 +11,23 @@
 //!   if none was declared). Doc comments on each entry are preserved on the
 //!   trait method; the `#[gas]`/`#[wasm]` attributes are stripped.
 //!
+//! The engine's import registration is *not* generated: `wasm_vm` walks
+//! `HostFn::ALL` in an exhaustive `match` (so a new variant won't compile until
+//! it's registered) and calls `func_wrap` per arm. That keeps all wasmi-facing
+//! code in `wasm_vm` and this macro focused on the ABI declaration.
+//!
 //! The macro deliberately emits bare identifiers (`HostResult`, `HostError`,
 //! `HostFnSpec`, `Vec`) rather than fully qualified paths: the call site is a
 //! `#![no_std]` crate that has these in scope, and there is no way to name
 //! `alloc::vec::Vec` generically without assuming the caller's exact import
 //! style. This is a deliberate non-hygienic design, not an oversight.
-//!
-//! This first milestone only generates the enum + trait — no wasmi
-//! registration, no guest-side import glue.
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
+    Attribute, Expr, ExprLit, Lit, Meta, ReturnType, TraitItemFn,
     parse::{Parse, ParseStream},
-    parse_macro_input, Attribute, Expr, ExprLit, Lit, Meta, ReturnType, TraitItemFn,
+    parse_macro_input,
 };
 
 /// Parses a `host_abi! { ... }` body as a sequence of body-less trait
@@ -67,7 +70,10 @@ fn name_value_lit(attr: &Attribute) -> syn::Result<Lit> {
     match &attr.meta {
         Meta::NameValue(nv) => match &nv.value {
             Expr::Lit(ExprLit { lit, .. }) => Ok(lit.clone()),
-            other => Err(syn::Error::new_spanned(other, "expected a literal value here")),
+            other => Err(syn::Error::new_spanned(
+                other,
+                "expected a literal value here",
+            )),
         },
         other => Err(syn::Error::new_spanned(
             other,
