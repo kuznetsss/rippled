@@ -8,6 +8,8 @@
 
 #include <rs_wasm_vm_cxxbridge/ffi.h>
 
+#include <xrpl/tx/wasm-rs/HostContext.h>
+
 #include <cstdint>
 #include <string_view>
 #include <vector>
@@ -41,6 +43,20 @@ runEscrowWasmRsFromWat(std::string_view wat, std::uint64_t gas)
     auto const code = rs::wasm_vm::compile_wat(rust::Str(wat.data(), wat.size()));
     return runEscrowWasmRs(
         std::vector<std::uint8_t>(code.begin(), code.end()), gas);
+}
+
+// Run `wat` through the Rust engine, servicing host calls via a C++ HostContext
+// (which forwards to real xrpl primitives). Proves the Rust->C++ callback path.
+inline EscrowRunResult
+runEscrowWasmRsFromWatWithCxxHost(std::string_view wat, std::uint64_t gas)
+{
+    auto const code = rs::wasm_vm::compile_wat(rust::Str(wat.data(), wat.size()));
+    HostContext ctx;
+    auto const r = rs::wasm_vm::run_escrow_with_cxx_host(
+        ctx,
+        rust::Slice<std::uint8_t const>(code.data(), code.size()),
+        gas);
+    return {r.result, r.fuel_used};
 }
 
 }  // namespace xrpl::wasmrs

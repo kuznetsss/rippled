@@ -33,3 +33,7 @@ endfunction()
 
 add_xrpl_crate(rs_hello_world CRATE rs_hello_world FILES lib.rs)
 add_xrpl_crate(rs_wasm_vm CRATE wasm_vm FILES ffi.rs)
+
+# The wasm_vm bridge's `include!()` pulls in a rippled public header, so the
+# generated bridge translation unit needs the project include dir.
+target_include_directories(rs_wasm_vm_cxxbridge PRIVATE ${CMAKE_SOURCE_DIR}/include)
