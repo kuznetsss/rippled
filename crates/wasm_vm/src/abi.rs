@@ -14,31 +14,31 @@ use wasmi::{Caller, Extern, Memory};
 /// `i32`/`i64` for a plain scalar, `(i32, i32)` for a (ptr, len) pair.
 pub(crate) trait AbiArg: Sized {
     type Raw;
-    fn read(caller: &Caller<'_, VmState>, raw: Self::Raw) -> HostResult<Self>;
+    fn read(caller: &Caller<'_, VmState<'_>>, raw: Self::Raw) -> HostResult<Self>;
 }
 
 impl AbiArg for i32 {
     type Raw = i32;
-    fn read(_c: &Caller<'_, VmState>, r: i32) -> HostResult<Self> {
+    fn read(_c: &Caller<'_, VmState<'_>>, r: i32) -> HostResult<Self> {
         Ok(r)
     }
 }
 impl AbiArg for i64 {
     type Raw = i64;
-    fn read(_c: &Caller<'_, VmState>, r: i64) -> HostResult<Self> {
+    fn read(_c: &Caller<'_, VmState<'_>>, r: i64) -> HostResult<Self> {
         Ok(r)
     }
 }
 impl AbiArg for bool {
     type Raw = i32;
-    fn read(_c: &Caller<'_, VmState>, r: i32) -> HostResult<Self> {
+    fn read(_c: &Caller<'_, VmState<'_>>, r: i32) -> HostResult<Self> {
         Ok(r != 0)
     }
 }
 
 impl AbiArg for Vec<u8> {
     type Raw = (i32, i32);
-    fn read(c: &Caller<'_, VmState>, (ptr, len): (i32, i32)) -> HostResult<Self> {
+    fn read(c: &Caller<'_, VmState<'_>>, (ptr, len): (i32, i32)) -> HostResult<Self> {
         let mem = memory(c)?;
         read_bytes(c, &mem, ptr, len)
     }
@@ -46,7 +46,7 @@ impl AbiArg for Vec<u8> {
 
 impl AbiArg for String {
     type Raw = (i32, i32);
-    fn read(c: &Caller<'_, VmState>, (ptr, len): (i32, i32)) -> HostResult<Self> {
+    fn read(c: &Caller<'_, VmState<'_>>, (ptr, len): (i32, i32)) -> HostResult<Self> {
         let mem = memory(c)?;
         read_str(c, &mem, ptr, len)
     }
@@ -59,25 +59,25 @@ impl AbiArg for String {
 /// `(i32, i32)` = (out_ptr, out_len) for buffers.
 pub(crate) trait AbiRet {
     type Out;
-    fn write(self, caller: &mut Caller<'_, VmState>, out: Self::Out) -> HostResult<i64>;
+    fn write(self, caller: &mut Caller<'_, VmState<'_>>, out: Self::Out) -> HostResult<i64>;
 }
 
 impl AbiRet for () {
     type Out = ();
-    fn write(self, _c: &mut Caller<'_, VmState>, _o: ()) -> HostResult<i64> {
+    fn write(self, _c: &mut Caller<'_, VmState<'_>>, _o: ()) -> HostResult<i64> {
         Ok(0)
     }
 }
 impl AbiRet for u32 {
     type Out = ();
-    fn write(self, _c: &mut Caller<'_, VmState>, _o: ()) -> HostResult<i64> {
+    fn write(self, _c: &mut Caller<'_, VmState<'_>>, _o: ()) -> HostResult<i64> {
         Ok(self as i64)
     }
 }
 
 impl AbiRet for Vec<u8> {
     type Out = (i32, i32);
-    fn write(self, c: &mut Caller<'_, VmState>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
+    fn write(self, c: &mut Caller<'_, VmState<'_>>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
         let mem = memory(c)?;
         Ok(write_bytes(c, &mem, ptr, cap, &self)? as i64)
     }
@@ -85,7 +85,7 @@ impl AbiRet for Vec<u8> {
 
 impl AbiRet for [u8; HASH_LEN] {
     type Out = (i32, i32);
-    fn write(self, c: &mut Caller<'_, VmState>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
+    fn write(self, c: &mut Caller<'_, VmState<'_>>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
         let mem = memory(c)?;
         Ok(write_bytes(c, &mem, ptr, cap, &self)? as i64)
     }
@@ -94,9 +94,9 @@ impl AbiRet for [u8; HASH_LEN] {
 /// Charge a host call's gas once (from the enum's spec) then run its body.
 /// Because every registered closure goes through here, gas can't be forgotten.
 pub(crate) fn charged(
-    caller: &mut Caller<'_, VmState>,
+    caller: &mut Caller<'_, VmState<'_>>,
     op: HostFn,
-    body: impl FnOnce(&mut Caller<'_, VmState>) -> HostResult<i64>,
+    body: impl FnOnce(&mut Caller<'_, VmState<'_>>) -> HostResult<i64>,
 ) -> HostResult<i64> {
     charge(caller, op.spec().base_gas)?;
     body(caller)

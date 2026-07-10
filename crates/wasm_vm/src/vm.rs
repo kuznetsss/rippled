@@ -3,8 +3,8 @@ use host_functions::HostFunctions;
 use wasmi::{Config, Engine, Linker, Module, Store};
 
 /// State threaded through every host call, stored in the wasmi [`Store`].
-pub struct VmState {
-    pub(crate) host: Box<dyn HostFunctions>,
+pub struct VmState<'h> {
+    pub(crate) host: &'h dyn HostFunctions,
 }
 
 /// Outcome of running an escrow contract to completion.
@@ -45,10 +45,10 @@ pub fn build_wasm_engine() -> Engine {
 ///
 /// This is the coarse, once-per-finish entry the C++ side will call across cxx
 /// in Step 3.
-pub fn run_escrow(
+pub fn run_escrow<'h>(
     wasm: &[u8],
     gas: u64,
-    host: Box<dyn HostFunctions>,
+    host: &'h dyn HostFunctions,
     function_name: &str,
 ) -> Result<RunOutcome, String> {
     let engine = build_wasm_engine();
@@ -57,7 +57,7 @@ pub fn run_escrow(
     let mut store = Store::new(&engine, VmState { host });
     store.set_fuel(gas).map_err(|e| format!("set_fuel: {e}"))?;
 
-    let mut linker = Linker::<VmState>::new(&engine);
+    let mut linker = Linker::<VmState<'h>>::new(&engine);
     register_host_functions(&mut linker)?;
 
     let instance = linker

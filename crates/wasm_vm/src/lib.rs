@@ -3,8 +3,9 @@
 //! This crate owns the wasmi interpreter. Per the redesign, it:
 //!
 //! * builds a per-invocation [`Store`] whose data is a [`VmState`] holding a
-//!   `Box<dyn HostFunctions>` — so *where* host calls are serviced (mock,
-//!   forward-to-C++, …) is a runtime choice the engine never sees;
+//!   `&dyn HostFunctions` — so *where* host calls are serviced (mock,
+//!   forward-to-C++, …) is a runtime choice the engine never sees, and a host
+//!   may borrow caller-owned state for the duration of the call;
 //! * registers each guest import as a native Rust closure that reads
 //!   *bounds-checked* slices out of guest memory, calls the
 //!   [`host_functions`] trait, and writes results back — the manual pointer
@@ -112,12 +113,12 @@ mod tests {
         let wasm = wat::parse_str(wat).expect("valid wat");
 
         let rec = Rc::new(Recording::default());
-        let host = Box::new(MockHost {
+        let host = MockHost {
             ledger_sqn: 42,
             rec: rec.clone(),
-        });
+        };
 
-        let outcome = run_escrow(&wasm, 1_000_000, host, "finish").expect("run ok");
+        let outcome = run_escrow(&wasm, 1_000_000, &host, "finish").expect("run ok");
 
         // finish returned the first byte of sha512Half("hello").
         let expected = sha512_half_bytes(b"hello");
@@ -144,12 +145,70 @@ mod tests {
         "#;
         let wasm = wat::parse_str(wat).expect("valid wat");
 
-        let host = Box::new(MockHost {
+        let host = MockHost {
             ledger_sqn: 1,
             rec: Rc::new(Recording::default()),
-        });
-        let outcome = run_escrow(&wasm, 1_000_000, host, "finish").expect("run ok");
+        };
+        let outcome = run_escrow(&wasm, 1_000_000, &host, "finish").expect("run ok");
 
         assert_eq!(outcome.result, HostError::BufferTooSmall.code());
+    }
+
+    #[test]
+    fn host_may_borrow_local_state() {
+        use std::cell::RefCell;
+
+        /// A host that borrows a caller-owned, non-`'static` `RefCell` — the
+        /// scenario this refactor exists for (e.g. a future `CxxHost` borrowing
+        /// a C++ context for the duration of one call).
+        struct BorrowingHost<'a> {
+            seen: &'a RefCell<Vec<i64>>,
+        }
+
+        impl HostFunctions for BorrowingHost<'_> {
+            fn get_ledger_sqn(&self) -> HostResult<u32> {
+                Ok(9)
+            }
+
+            fn get_current_ledger_obj_field(&self, _field_code: i32) -> HostResult<Vec<u8>> {
+                Err(HostError::FieldNotFound)
+            }
+
+            fn sha512_half(&self, _data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
+                Err(HostError::Internal)
+            }
+
+            fn trace(&self, _msg: &str, _data: &[u8], _as_hex: bool) -> HostResult<()> {
+                Ok(())
+            }
+
+            fn trace_num(&self, _msg: &str, number: i64) -> HostResult<()> {
+                self.seen.borrow_mut().push(number);
+                Ok(())
+            }
+        }
+
+        // Guest: read the ledger sqn, pass it to trace_num, and return it.
+        let wat = r#"
+            (module
+              (import "host" "ldgr_index" (func $ldgr_index (result i64)))
+              (import "host" "trace_num"  (func $trace_num (param i32 i32 i64) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "sqn")
+              (func (export "finish") (result i32)
+                (local $s i64)
+                (local.set $s (call $ldgr_index))
+                (drop (call $trace_num (i32.const 0) (i32.const 3) (local.get $s)))
+                (i32.wrap_i64 (local.get $s))))
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+
+        let seen = RefCell::new(Vec::new());
+        let host = BorrowingHost { seen: &seen };
+
+        let out = run_escrow(&wasm, 1_000_000, &host, "finish").expect("run ok");
+
+        assert_eq!(out.result, 9);
+        assert_eq!(*seen.borrow(), vec![9i64]);
     }
 }
