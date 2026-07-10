@@ -8,3 +8,4 @@ edition.workspace = true
 # crate can be linked by the native host (std), the cxx-forwarding host, and the
 # wasm32 guest `stdlib`.
 [dependencies]
+host_functions_macros = { path = "../host_functions_macros" }

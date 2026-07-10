@@ -26,6 +26,8 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
+use host_functions_macros::host_abi;
+
 /// Error codes a host function may return.
 ///
 /// The discriminants mirror `HostFunctionError` in
@@ -75,39 +77,129 @@ pub type HostResult<T> = Result<T, HostError>;
 /// A `sha512Half` digest: the first 32 bytes of a SHA-512, as XRPL uses it.
 pub const HASH_LEN: usize = 32;
 
-/// The host functions a guest contract may call.
-///
-/// The trait is written in terms of ordinary Rust types (`&[u8]`, `Vec<u8>`,
-/// `&str`, `u32`). It says nothing about wasm linear memory or pointers — that
-/// marshaling lives in the engine on the host side and in `stdlib` on the guest
-/// side. The trait stays object-safe so the engine can hold a
-/// `Box<dyn HostFunctions>` in its `Store`.
-///
-/// The PoC exposes four functions, each chosen to exercise a distinct ABI
-/// shape:
-/// * [`get_ledger_sqn`](HostFunctions::get_ledger_sqn) — scalar out, ledger
-///   read (needs host context);
-/// * [`get_current_ledger_obj_field`](HostFunctions::get_current_ledger_obj_field)
-///   — read a scalar in, return a variable-length byte buffer;
-/// * [`sha512_half`](HostFunctions::sha512_half) — read a byte slice, return a
-///   fixed-size buffer (a pure function, later forwarded to C++);
-/// * [`trace`](HostFunctions::trace) / [`trace_num`](HostFunctions::trace_num)
-///   — read a byte slice in, return nothing (debug).
-pub trait HostFunctions {
-    /// Sequence number of the ledger the escrow is being finished in.
-    fn get_ledger_sqn(&self) -> HostResult<u32>;
+/// Per-function ABI metadata: the wasm import name and the consensus-fixed base gas cost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostFnSpec {
+    pub name: &'static str,
+    pub base_gas: u64,
+}
 
-    /// Serialized bytes of a field on the current (escrow) ledger object,
-    /// selected by its `SField` numeric code.
-    fn get_current_ledger_obj_field(&self, field_code: i32) -> HostResult<Vec<u8>>;
+// The host functions a guest contract may call.
+//
+// Declared once via `host_abi!` as the single source of truth: each entry
+// below carries its wasm import name (`#[wasm]`) and consensus-fixed base gas
+// cost (`#[gas]`), and expands to both the `HostFn` enum (metadata, for the
+// engine's import registration and gas accounting) and the `HostFunctions`
+// trait.
+//
+// The trait is written in terms of ordinary Rust types (`&[u8]`, `Vec<u8>`,
+// `&str`, `u32`). It says nothing about wasm linear memory or pointers — that
+// marshaling lives in the engine on the host side and in `stdlib` on the guest
+// side. The trait stays object-safe so the engine can hold a
+// `Box<dyn HostFunctions>` in its `Store`.
+//
+// The PoC exposes five functions, each chosen to exercise a distinct ABI
+// shape:
+// * `get_ledger_sqn` — scalar out, ledger read (needs host context);
+// * `get_current_ledger_obj_field` — read a scalar in, return a
+//   variable-length byte buffer;
+// * `sha512_half` — read a byte slice, return a fixed-size buffer (a pure
+//   function, later forwarded to C++);
+// * `trace` / `trace_num` — read a byte slice in, return nothing (debug).
+host_abi! {
+    /// Sequence number of the current ledger.
+    #[gas = 60]
+    #[wasm = "ldgr_index"]
+    fn get_ledger_sqn() -> u32;
 
-    /// The XRPL `sha512Half` (first 32 bytes of SHA-512) of `data`.
-    fn sha512_half(&self, data: &[u8]) -> HostResult<[u8; HASH_LEN]>;
+    /// Serialized bytes of a field on the current (escrow) ledger object.
+    #[gas = 70]
+    #[wasm = "home_le_field"]
+    fn get_current_ledger_obj_field(field: i32) -> Vec<u8>;
 
-    /// Emit a trace line: a UTF-8 message plus a byte payload rendered as hex
-    /// (`as_hex`) or raw.
-    fn trace(&self, msg: &str, data: &[u8], as_hex: bool) -> HostResult<()>;
+    /// The XRPL sha512Half (first 32 bytes of SHA-512) of `data`.
+    #[gas = 2000]
+    #[wasm = "sha512_half"]
+    fn sha512_half(data: &[u8]) -> [u8; 32];
 
-    /// Emit a trace line: a UTF-8 message plus a signed integer.
-    fn trace_num(&self, msg: &str, number: i64) -> HostResult<()>;
+    /// Emit a trace line with a byte payload.
+    #[gas = 500]
+    #[wasm = "trace"]
+    fn trace(msg: &str, data: &[u8], as_hex: bool);
+
+    /// Emit a trace line with a signed integer.
+    #[gas = 500]
+    #[wasm = "trace_num"]
+    fn trace_num(msg: &str, number: i64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A trivial implementation of every `HostFunctions` method, existing only
+    /// to prove the macro-generated trait shape compiles and is object-safe.
+    struct Dummy;
+
+    impl HostFunctions for Dummy {
+        fn get_ledger_sqn(&self) -> HostResult<u32> {
+            Ok(0)
+        }
+
+        fn get_current_ledger_obj_field(&self, _field: i32) -> HostResult<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn sha512_half(&self, _data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
+            Ok([0u8; HASH_LEN])
+        }
+
+        fn trace(&self, _msg: &str, _data: &[u8], _as_hex: bool) -> HostResult<()> {
+            Ok(())
+        }
+
+        fn trace_num(&self, _msg: &str, _number: i64) -> HostResult<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant() {
+        assert_eq!(HostFn::ALL.len(), 5);
+    }
+
+    #[test]
+    fn spec_values_are_correct() {
+        assert_eq!(HostFn::GetLedgerSqn.spec().name, "ldgr_index");
+        assert_eq!(HostFn::GetLedgerSqn.spec().base_gas, 60);
+
+        assert_eq!(
+            HostFn::GetCurrentLedgerObjField.spec().name,
+            "home_le_field"
+        );
+        assert_eq!(HostFn::GetCurrentLedgerObjField.spec().base_gas, 70);
+
+        assert_eq!(HostFn::Sha512Half.spec().name, "sha512_half");
+        assert_eq!(HostFn::Sha512Half.spec().base_gas, 2000);
+
+        assert_eq!(HostFn::Trace.spec().name, "trace");
+        assert_eq!(HostFn::Trace.spec().base_gas, 500);
+
+        assert_eq!(HostFn::TraceNum.spec().name, "trace_num");
+        assert_eq!(HostFn::TraceNum.spec().base_gas, 500);
+    }
+
+    #[test]
+    fn spec_names_are_unique() {
+        for (i, a) in HostFn::ALL.iter().enumerate() {
+            for b in &HostFn::ALL[i + 1..] {
+                assert_ne!(a.spec().name, b.spec().name);
+            }
+        }
+    }
+
+    #[test]
+    fn host_functions_trait_is_object_safe() {
+        let _: alloc::boxed::Box<dyn HostFunctions> = alloc::boxed::Box::new(Dummy);
+    }
 }

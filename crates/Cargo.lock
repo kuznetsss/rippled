@@ -225,6 +225,18 @@ checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
 [[package]]
 name = "host_functions"
 version = "0.1.0"
+dependencies = [
+ "host_functions_macros",
+]
+
+[[package]]
+name = "host_functions_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "indexmap"
