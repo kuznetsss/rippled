@@ -30,6 +30,14 @@ mod ffi {
         value: Hash,
     }
 
+    /// A variable-length byte result carrying a status (>= 0 ok, < 0 =
+    /// `HostError` code), used by host functions that return a buffer whose
+    /// size isn't known ahead of time (e.g. a serialized ledger-object field).
+    struct BytesResult {
+        status: i32,
+        data: Vec<u8>,
+    }
+
     extern "Rust" {
         // Run `wasm`'s `finish` export with `gas` fuel against a built-in
         // mock host.
@@ -37,7 +45,8 @@ mod ffi {
 
         // Run `wasm`'s `finish` export with `gas` fuel against a C++-backed
         // `HostContext`, proving the Rust->C++ host-function callback path.
-        fn run_escrow_with_cxx_host(host: &HostContext, wasm: &[u8], gas: u64) -> Result<RunResult>;
+        fn run_escrow_with_cxx_host(host: &HostContext, wasm: &[u8], gas: u64)
+        -> Result<RunResult>;
 
         // Compile WebAssembly text (WAT) to wasm bytes. A tooling/test helper
         // so callers can express modules as readable text instead of raw bytes.
@@ -52,11 +61,23 @@ mod ffi {
 
         #[namespace = "xrpl::wasmrs"]
         fn sha512_half(self: &HostContext, data: &[u8]) -> HashResult;
+
+        #[namespace = "xrpl::wasmrs"]
+        fn get_ledger_sqn(self: &HostContext) -> i64;
+
+        #[namespace = "xrpl::wasmrs"]
+        fn get_current_ledger_obj_field(self: &HostContext, field: i32) -> BytesResult;
+
+        #[namespace = "xrpl::wasmrs"]
+        fn trace(self: &HostContext, msg: &str, data: &[u8], as_hex: bool) -> i32;
+
+        #[namespace = "xrpl::wasmrs"]
+        fn trace_num(self: &HostContext, msg: &str, number: i64) -> i32;
     }
 }
 
 use crate::run_escrow;
-use host_functions::{HostError, HostFunctions, HostResult, HASH_LEN};
+use host_functions::{HASH_LEN, HostError, HostFunctions, HostResult};
 
 /// Minimal synthetic-ledger host with no external deps (no `sha2`). Used by
 /// `run_escrow_mocked` for engine-only tests; [`CxxHost`] below is the
@@ -117,11 +138,21 @@ struct CxxHost<'a> {
 
 impl HostFunctions for CxxHost<'_> {
     fn get_ledger_sqn(&self) -> HostResult<u32> {
-        Err(HostError::Internal)
+        let v = self.ctx.get_ledger_sqn();
+        if v < 0 {
+            Err(HostError::from_code(v as i32))
+        } else {
+            Ok(v as u32)
+        }
     }
 
-    fn get_current_ledger_obj_field(&self, _field: i32) -> HostResult<Vec<u8>> {
-        Err(HostError::Internal)
+    fn get_current_ledger_obj_field(&self, field: i32) -> HostResult<Vec<u8>> {
+        let r = self.ctx.get_current_ledger_obj_field(field);
+        if r.status < 0 {
+            Err(HostError::from_code(r.status))
+        } else {
+            Ok(r.data)
+        }
     }
 
     fn sha512_half(&self, data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
@@ -133,13 +164,22 @@ impl HostFunctions for CxxHost<'_> {
         }
     }
 
-    // The other four are wired to C++ in a later step; stub as Internal for now.
-    fn trace(&self, _msg: &str, _data: &[u8], _as_hex: bool) -> HostResult<()> {
-        Err(HostError::Internal)
+    fn trace(&self, msg: &str, data: &[u8], as_hex: bool) -> HostResult<()> {
+        let s = self.ctx.trace(msg, data, as_hex);
+        if s < 0 {
+            Err(HostError::from_code(s))
+        } else {
+            Ok(())
+        }
     }
 
-    fn trace_num(&self, _msg: &str, _number: i64) -> HostResult<()> {
-        Err(HostError::Internal)
+    fn trace_num(&self, msg: &str, number: i64) -> HostResult<()> {
+        let s = self.ctx.trace_num(msg, number);
+        if s < 0 {
+            Err(HostError::from_code(s))
+        } else {
+            Ok(())
+        }
     }
 }
 
