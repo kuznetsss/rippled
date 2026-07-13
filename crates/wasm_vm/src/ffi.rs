@@ -7,7 +7,7 @@
 //! `run_escrow_mocked` still runs a wasm blob's `finish` export against a
 //! built-in [`SampleHost`] (no C++ involved) — useful for engine-only tests.
 #[cxx::bridge(namespace = "rs::wasm_vm")]
-mod ffi {
+mod bridge {
     /// Mirrors [`crate::RunOutcome`] as a plain-data type cxx can share
     /// across the FFI boundary.
     struct RunResult {
@@ -113,10 +113,10 @@ impl HostFunctions for SampleHost {
 /// requires of an error type (it gets turned into a thrown `rust::Error` on
 /// the C++ side via `Display::to_string`) — so no extra error wrapper type
 /// is needed here.
-fn run_escrow_mocked(wasm: &[u8], gas: u64) -> Result<ffi::RunResult, String> {
+fn run_escrow_mocked(wasm: &[u8], gas: u64) -> Result<bridge::RunResult, String> {
     let host = SampleHost;
     let out = run_escrow(wasm, gas, &host, "finish")?;
-    Ok(ffi::RunResult {
+    Ok(bridge::RunResult {
         result: out.result,
         fuel_used: out.fuel_used,
     })
@@ -133,7 +133,7 @@ fn compile_wat(wat: &str) -> Result<Vec<u8>, String> {
 /// borrowed C++ `HostContext` (opaque cxx types are `!Sized`, so the trait
 /// object needs this wrapper).
 struct CxxHost<'a> {
-    ctx: &'a ffi::HostContext,
+    ctx: &'a bridge::HostContext,
 }
 
 impl HostFunctions for CxxHost<'_> {
@@ -188,13 +188,13 @@ impl HostFunctions for CxxHost<'_> {
 /// the guest's `sha512_half` import is serviced by forwarding across cxx to
 /// the existing C++ `sha512Half` primitive.
 fn run_escrow_with_cxx_host(
-    host: &ffi::HostContext,
+    host: &bridge::HostContext,
     wasm: &[u8],
     gas: u64,
-) -> Result<ffi::RunResult, String> {
+) -> Result<bridge::RunResult, String> {
     let cxx_host = CxxHost { ctx: host };
     let out = run_escrow(wasm, gas, &cxx_host, "finish")?;
-    Ok(ffi::RunResult {
+    Ok(bridge::RunResult {
         result: out.result,
         fuel_used: out.fuel_used,
     })

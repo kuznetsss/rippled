@@ -21,7 +21,7 @@ mod ffi;
 mod imports;
 mod vm;
 
-pub use vm::{build_wasm_engine, run_escrow, RunOutcome, VmState};
+pub use vm::{run_escrow, wasm_engine, RunOutcome, VmState};
 
 // ---------------------------------------------------------------------------
 // Tests: a native MockHost implementing the trait + an end-to-end run of a

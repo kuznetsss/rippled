@@ -1,6 +1,6 @@
-use crate::abi::{charged, to_wasm_i32, to_wasm_i64, AbiArg, AbiRet};
+use crate::abi::{AbiArg, AbiRet, charged, to_wasm_i32, to_wasm_i64};
 use crate::vm::VmState;
-use host_functions::{HostFn, HASH_LEN};
+use host_functions::{HASH_LEN, HostFn};
 use wasmi::{Caller, Linker};
 
 /// Import module namespace the guest imports host functions from
@@ -40,11 +40,19 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
             HostFn::GetCurrentLedgerObjField => linker.func_wrap(
                 HOST_MODULE,
                 op.spec().name,
-                |mut caller: Caller<'_, VmState<'_>>, field: i32, out_ptr: i32, out_len: i32| -> i32 {
-                    to_wasm_i32(charged(&mut caller, HostFn::GetCurrentLedgerObjField, |c| {
-                        let __ret = c.data().host.get_current_ledger_obj_field(field)?;
-                        <Vec<u8> as AbiRet>::write(__ret, c, (out_ptr, out_len))
-                    }))
+                |mut caller: Caller<'_, VmState<'_>>,
+                 field: i32,
+                 out_ptr: i32,
+                 out_len: i32|
+                 -> i32 {
+                    to_wasm_i32(charged(
+                        &mut caller,
+                        HostFn::GetCurrentLedgerObjField,
+                        |c| {
+                            let __ret = c.data().host.get_current_ledger_obj_field(field)?;
+                            <Vec<u8> as AbiRet>::write(__ret, c, (out_ptr, out_len))
+                        },
+                    ))
                 },
             ),
             HostFn::Sha512Half => linker.func_wrap(
@@ -84,7 +92,11 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
             HostFn::TraceNum => linker.func_wrap(
                 HOST_MODULE,
                 op.spec().name,
-                |mut caller: Caller<'_, VmState<'_>>, msg_ptr: i32, msg_len: i32, number: i64| -> i32 {
+                |mut caller: Caller<'_, VmState<'_>>,
+                 msg_ptr: i32,
+                 msg_len: i32,
+                 number: i64|
+                 -> i32 {
                     to_wasm_i32(charged(&mut caller, HostFn::TraceNum, |c| {
                         let msg = <String as AbiArg>::read(c, (msg_ptr, msg_len))?;
                         let __ret = c.data().host.trace_num(&msg, number)?;

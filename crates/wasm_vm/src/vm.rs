@@ -1,5 +1,6 @@
 use crate::imports::register_host_functions;
 use host_functions::HostFunctions;
+use std::sync::LazyLock;
 use wasmi::{Config, Engine, Linker, Module, Store};
 
 /// State threaded through every host call, stored in the wasmi [`Store`].
@@ -17,10 +18,22 @@ pub struct RunOutcome {
     pub fuel_used: u64,
 }
 
+/// The process-wide wasmi engine, built once on first use.
+///
+/// The engine's configuration is consensus-fixed and identical for every
+/// invocation, so there is no reason to rebuild it per finish. A wasmi
+/// [`Engine`] is an `Arc` internally (cheap to share, `Send + Sync`), and
+/// modules compiled against it are per-invocation, so a single shared engine is
+/// safe to reuse across concurrent [`run_escrow`] calls.
+pub fn wasm_engine() -> &'static Engine {
+    static ENGINE: LazyLock<Engine> = LazyLock::new(build_wasm_engine);
+    &ENGINE
+}
+
 /// Build the wasmi engine with the sandboxing knobs the escrow VM requires.
 /// (Unchanged from the original skeleton: a deterministic, minimal-feature
 /// configuration with fuel metering on.)
-pub fn build_wasm_engine() -> Engine {
+fn build_wasm_engine() -> Engine {
     let mut config = Config::default();
     config.consume_fuel(true);
     config.ignore_custom_sections(true);
@@ -51,13 +64,13 @@ pub fn run_escrow<'h>(
     host: &'h dyn HostFunctions,
     function_name: &str,
 ) -> Result<RunOutcome, String> {
-    let engine = build_wasm_engine();
-    let module = Module::new(&engine, wasm).map_err(|e| format!("compile: {e}"))?;
+    let engine = wasm_engine();
+    let module = Module::new(engine, wasm).map_err(|e| format!("compile: {e}"))?;
 
-    let mut store = Store::new(&engine, VmState { host });
+    let mut store = Store::new(engine, VmState { host });
     store.set_fuel(gas).map_err(|e| format!("set_fuel: {e}"))?;
 
-    let mut linker = Linker::<VmState<'h>>::new(&engine);
+    let mut linker = Linker::<VmState<'h>>::new(engine);
     register_host_functions(&mut linker)?;
 
     let instance = linker
