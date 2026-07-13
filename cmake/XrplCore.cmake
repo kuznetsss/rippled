@@ -201,6 +201,14 @@ target_link_libraries(
 
 add_module(xrpl tx)
 target_link_libraries(xrpl.libxrpl.tx PUBLIC xrpl.libxrpl.ledger)
+# The wasm-rs bridge shim (src/libxrpl/tx/wasm-rs/HostContext.cpp) forwards the
+# Rust engine's host calls back to xrpl::HostFunctions. It needs the generated
+# cxxbridge headers (rs_wasm_vm_cxxbridge/ffi.h, rust/cxx.h) on its include path;
+# PUBLIC so consumers of the wasm-rs public headers (WasmVmRs.h / HostContext.h)
+# get them too. The bridge declares no dependency back on xrpl, so this is not a
+# target cycle: the bridge's undefined HostContext symbols resolve at the final
+# executable link, where HostContext.o (in xrpl.libxrpl) is present.
+target_link_libraries(xrpl.libxrpl.tx PUBLIC rs_wasm_vm_cxxbridge)
 
 add_library(xrpl.libxrpl)
 set_target_properties(xrpl.libxrpl PROPERTIES OUTPUT_NAME xrpl)
@@ -279,6 +287,12 @@ if(xrpld)
         target_link_libraries(xrpld rs_hello_world_cxxbridge)
     endif()
 
+    # rs_wasm_vm_cxxbridge (the Rust wasm-vm engine + the wasm-rs HostContext
+    # shim it calls back into) arrives here transitively: xrpl.libxrpl.tx links
+    # it PUBLIC, so every consumer of xrpl.libxrpl gets it exactly once. No
+    # explicit link needed. It's dead code in the daemon for now (no production
+    # path calls the Rust engine yet), but promoting the shim into xrpl.libxrpl
+    # is what lets it live in src/ instead of the test tree.
     target_link_libraries(xrpld Xrpl::boost Xrpl::opts Xrpl::libs xrpl.libxrpl)
     exclude_if_included(xrpld)
     # define a macro for tests that might need to
