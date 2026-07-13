@@ -1,5 +1,6 @@
 [workspace]
 members = ["hello_world", "host_functions", "host_functions_macros", "stdlib", "wasm_vm"]
+exclude = ["example_contract"]
 resolver = "3"
 
 [workspace.dependencies]

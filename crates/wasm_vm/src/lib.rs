@@ -211,4 +211,25 @@ mod tests {
         assert_eq!(out.result, 9);
         assert_eq!(*seen.borrow(), vec![9i64]);
     }
+
+    /// Closes the loop end to end: a real `example_contract` smart contract,
+    /// written against `stdlib`'s `HostFunctions` implementation and compiled
+    /// to wasm32-unknown-unknown, run through this engine with its host calls
+    /// serviced by the same `MockHost` the hand-written-WAT tests above use.
+    #[test]
+    fn runs_a_compiled_wasm32_contract() {
+        let wasm = include_bytes!("../tests/fixtures/example_contract.wasm");
+        let rec = Rc::new(Recording::default());
+        let host = MockHost {
+            ledger_sqn: 42,
+            rec: rec.clone(),
+        };
+        let out = run_escrow(wasm, 100_000_000, &host, "finish").expect("contract runs");
+        assert_eq!(out.result, 1); // 42 >= 10 -> allow finish
+        assert_eq!(
+            rec.nums.borrow().as_slice(),
+            &[("ledger_sqn".to_string(), 42i64)]
+        );
+        assert!(out.fuel_used > 0);
+    }
 }

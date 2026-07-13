@@ -89,3 +89,4 @@ __pycache__
 
 # Rust build directory
 crates/target
+crates/example_contract/target
