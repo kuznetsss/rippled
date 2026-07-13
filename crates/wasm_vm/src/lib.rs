@@ -56,9 +56,15 @@ mod tests {
         }
 
         fn get_current_ledger_obj_field(&self, field_code: i32) -> HostResult<Vec<u8>> {
-            // Canned "escrow object": field 1 -> three bytes, everything else absent.
+            // Canned "escrow object": field 1 -> three bytes; field 3 -> one
+            // byte over the 1 KiB field cap (`MAX_WASM_DATA_LEN`), to drive
+            // the `DataFieldTooLarge` guardrail; field 4 -> exactly 1 KiB, to
+            // drive the transfer-limit / field-cap boundary tests; everything
+            // else absent.
             match field_code {
                 1 => Ok(vec![0xAA, 0xBB, 0xCC]),
+                3 => Ok(vec![0u8; 1025]),
+                4 => Ok(vec![0u8; 1024]),
                 _ => Err(HostError::FieldNotFound),
             }
         }
@@ -231,5 +237,177 @@ mod tests {
             &[("ledger_sqn".to_string(), 42i64)]
         );
         assert!(out.fuel_used > 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Guardrail tests: linear-memory page cap, per-run transfer limit, and
+    // the 1 KiB per-field size cap.
+    // -----------------------------------------------------------------------
+
+    fn fresh_host() -> MockHost {
+        MockHost {
+            ledger_sqn: 1,
+            rec: Rc::new(Recording::default()),
+        }
+    }
+
+    /// 128 pages (`crate::vm::MAX_MEMORY_PAGES`) is the cap; landing exactly
+    /// on it via `memory.grow` must still succeed.
+    #[test]
+    fn memory_grow_to_exactly_the_cap_succeeds() {
+        // 127 initial pages + growing by 1 lands exactly on the 128-page cap.
+        let wat = r#"
+            (module
+              (memory (export "memory") 127)
+              (func (export "finish") (result i32)
+                (memory.grow (i32.const 1)))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let out = run_escrow(&wasm, 1_000_000, &fresh_host(), "finish").expect("run ok");
+        assert_eq!(out.result, 127); // memory.grow returns the previous size on success
+    }
+
+    /// One page past the cap must fail: `run_escrow`'s `trap_on_grow_failure`
+    /// setting means this surfaces as a trap, not a `-1` guest-visible return.
+    #[test]
+    fn memory_grow_one_page_past_the_cap_traps() {
+        // Same starting point as above, but grow by 2: lands one page past
+        // the 128-page cap.
+        let wat = r#"
+            (module
+              (memory (export "memory") 127)
+              (func (export "finish") (result i32)
+                (memory.grow (i32.const 2)))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let err = run_escrow(&wasm, 1_000_000, &fresh_host(), "finish")
+            .expect_err("growth past the cap should trap");
+        assert!(err.contains("trap"), "unexpected error: {err}");
+    }
+
+    /// Declaring initial memory beyond the cap must fail at instantiation,
+    /// before the guest ever runs (mirrors wasmi's own `ResourceLimiter`
+    /// instantiation-time behavior).
+    #[test]
+    fn initial_memory_beyond_cap_fails_to_instantiate() {
+        // 200 initial pages (12.5 MiB) exceeds the 128-page (8 MiB) cap.
+        let wat = r#"
+            (module
+              (memory (export "memory") 200)
+              (func (export "finish") (result i32) (i32.const 0))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let err = run_escrow(&wasm, 1_000_000, &fresh_host(), "finish")
+            .expect_err("oversized initial memory should fail to instantiate");
+        assert!(err.contains("instantiate"), "unexpected error: {err}");
+    }
+
+    /// A field read at exactly 1024 bytes (`MAX_WASM_DATA_LEN`) is allowed.
+    #[test]
+    fn field_read_at_exactly_the_cap_succeeds() {
+        let wat = r#"
+            (module
+              (import "host" "sha512_half" (func $sha512_half (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "finish") (result i32)
+                (call $sha512_half (i32.const 0) (i32.const 1024) (i32.const 2048) (i32.const 32)))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let out = run_escrow(&wasm, 1_000_000, &fresh_host(), "finish").expect("run ok");
+        assert_eq!(out.result, 32); // wrote the full 32-byte digest
+    }
+
+    /// A field read one byte over 1024 (`MAX_WASM_DATA_LEN`) is rejected with
+    /// `DataFieldTooLarge` — and the existing-smell fix means this happens
+    /// before any `len`-sized allocation.
+    #[test]
+    fn oversized_field_read_is_rejected() {
+        let wat = r#"
+            (module
+              (import "host" "sha512_half" (func $sha512_half (param i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "finish") (result i32)
+                (call $sha512_half (i32.const 0) (i32.const 1025) (i32.const 2048) (i32.const 32)))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let out = run_escrow(&wasm, 1_000_000, &fresh_host(), "finish").expect("run ok");
+        assert_eq!(out.result, HostError::DataFieldTooLarge.code());
+    }
+
+    /// A field write at exactly 1024 bytes is allowed (host's field 4 in
+    /// `MockHost::get_current_ledger_obj_field` returns exactly the cap).
+    #[test]
+    fn field_write_at_exactly_the_cap_succeeds() {
+        let wat = r#"
+            (module
+              (import "host" "home_le_field" (func $home_le_field (param i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "finish") (result i32)
+                (call $home_le_field (i32.const 4) (i32.const 0) (i32.const 1024)))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let out = run_escrow(&wasm, 1_000_000, &fresh_host(), "finish").expect("run ok");
+        assert_eq!(out.result, 1024);
+    }
+
+    /// A field write one byte over the cap (host's field 3 returns 1025
+    /// bytes) is rejected with `DataFieldTooLarge`, before it ever touches
+    /// the transfer budget — matching the C++ order (size cap precedes the
+    /// transfer check).
+    #[test]
+    fn oversized_field_write_is_rejected_before_transfer_check() {
+        let wat = r#"
+            (module
+              (import "host" "home_le_field" (func $home_le_field (param i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "finish") (result i32)
+                (call $home_le_field (i32.const 3) (i32.const 0) (i32.const 2000)))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let out = run_escrow(&wasm, 1_000_000, &fresh_host(), "finish").expect("run ok");
+        assert_eq!(out.result, HostError::DataFieldTooLarge.code());
+    }
+
+    /// Drives cumulative host<->guest byte traffic past the 1 MiB per-run
+    /// transfer limit (`crate::vm::TRANSFER_LIMIT_BYTES`) and checks the
+    /// guest sees `OutOfTransferLimit` once the budget is exhausted.
+    ///
+    /// Each loop iteration writes exactly 1024 bytes (host field 4, the
+    /// `MAX_WASM_DATA_LEN` cap) via `get_current_ledger_obj_field`, so the
+    /// budget is exhausted after exactly 1024 successful calls
+    /// (1024 * 1024 == 1 << 20); the 1025th call must fail.
+    #[test]
+    fn cumulative_transfer_past_the_limit_is_rejected() {
+        let wat = r#"
+            (module
+              (import "host" "home_le_field" (func $home_le_field (param i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (func (export "finish") (result i32)
+                (local $i i32)
+                (local $r i32)
+                (block $done
+                  (loop $again
+                    (local.set $r (call $home_le_field (i32.const 4) (i32.const 0) (i32.const 1024)))
+                    (br_if $done (i32.lt_s (local.get $r) (i32.const 0)))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    ;; safety cap: comfortably more than the ~1024 calls
+                    ;; needed to exhaust the 1 MiB budget.
+                    (br_if $done (i32.ge_s (local.get $i) (i32.const 2000)))
+                    (br $again)
+                  )
+                )
+                (local.get $r))
+            )
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+        let out = run_escrow(&wasm, 5_000_000, &fresh_host(), "finish").expect("run ok");
+        assert_eq!(out.result, HostError::OutOfTransferLimit.code());
     }
 }

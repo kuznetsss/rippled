@@ -120,6 +120,14 @@ pub(crate) fn to_wasm_i64(r: HostResult<i64>) -> i64 {
 // concentrated and safe: every access is a checked wasmi slice op)
 // ---------------------------------------------------------------------------
 
+/// Per-field size cap for any single value crossing the host/guest boundary.
+///
+/// Mirrors `kMaxWasmDataLength = 1 * 1024` in
+/// `include/xrpl/protocol/Protocol.h:261`, enforced by `getDataSlice`/
+/// `setData` (`src/libxrpl/tx/wasm/HostFuncWrapper.cpp`) returning
+/// `DataFieldTooLarge`.
+const MAX_WASM_DATA_LEN: usize = 1024;
+
 /// Deduct `cost` fuel for a host call; `OutOfGas` if it would go negative.
 fn charge<T>(caller: &mut Caller<'_, T>, cost: u64) -> Result<(), HostError> {
     let remaining = caller.get_fuel().map_err(|_| HostError::Internal)?;
@@ -132,6 +140,21 @@ fn charge<T>(caller: &mut Caller<'_, T>, cost: u64) -> Result<(), HostError> {
     }
 }
 
+/// Deduct `n` bytes from the per-run transfer-limit budget (see
+/// [`crate::vm::TRANSFER_LIMIT_BYTES`]); `OutOfTransferLimit` if it would go
+/// negative. A separate budget from gas — see `VmState::transfer_budget`.
+fn charge_transfer(state: &VmState<'_>, n: usize) -> Result<(), HostError> {
+    let n = n as u64;
+    let remaining = state.transfer_budget.get();
+    match remaining.checked_sub(n) {
+        Some(left) => {
+            state.transfer_budget.set(left);
+            Ok(())
+        }
+        None => Err(HostError::OutOfTransferLimit),
+    }
+}
+
 /// The guest's exported linear memory.
 fn memory<T>(caller: &Caller<'_, T>) -> Result<Memory, HostError> {
     match caller.get_export("memory") {
@@ -141,8 +164,14 @@ fn memory<T>(caller: &Caller<'_, T>) -> Result<Memory, HostError> {
 }
 
 /// Copy `len` bytes out of guest memory at `ptr`.
-fn read_bytes<T>(
-    caller: &Caller<'_, T>,
+///
+/// Checks are ordered to match the C++ host-call sequence: params validity,
+/// then the [`MAX_WASM_DATA_LEN`] size cap (`DataFieldTooLarge`), then the
+/// transfer-limit budget (`OutOfTransferLimit`) — all *before* allocating the
+/// output buffer or touching guest memory, so an oversized/over-budget `len`
+/// never drives an allocation.
+fn read_bytes(
+    caller: &Caller<'_, VmState<'_>>,
     mem: &Memory,
     ptr: i32,
     len: i32,
@@ -150,15 +179,20 @@ fn read_bytes<T>(
     if ptr < 0 || len < 0 {
         return Err(HostError::InvalidParams);
     }
-    let mut buf = vec![0u8; len as usize];
+    let len = len as usize;
+    if len > MAX_WASM_DATA_LEN {
+        return Err(HostError::DataFieldTooLarge);
+    }
+    charge_transfer(caller.data(), len)?;
+    let mut buf = vec![0u8; len];
     mem.read(caller, ptr as usize, &mut buf)
         .map_err(|_| HostError::PointerOutOfBounds)?;
     Ok(buf)
 }
 
 /// Copy a UTF-8 string out of guest memory at `ptr`.
-fn read_str<T>(
-    caller: &Caller<'_, T>,
+fn read_str(
+    caller: &Caller<'_, VmState<'_>>,
     mem: &Memory,
     ptr: i32,
     len: i32,
@@ -167,10 +201,14 @@ fn read_str<T>(
     String::from_utf8(bytes).map_err(|_| HostError::Decoding)
 }
 
-/// Write `src` into the guest buffer `[dst, dst + cap)`; returns bytes written,
-/// or `BufferTooSmall` if the guest's buffer can't hold it.
-fn write_bytes<T>(
-    caller: &mut Caller<'_, T>,
+/// Write `src` into the guest buffer `[dst, dst + cap)`; returns bytes written.
+///
+/// Checks, in order: params validity; the [`MAX_WASM_DATA_LEN`] size cap
+/// (`DataFieldTooLarge`) — so an oversized field is rejected before it ever
+/// touches the transfer budget; `BufferTooSmall` if the guest's buffer can't
+/// hold it; then the transfer-limit budget (`OutOfTransferLimit`).
+fn write_bytes(
+    caller: &mut Caller<'_, VmState<'_>>,
     mem: &Memory,
     dst: i32,
     cap: i32,
@@ -179,9 +217,13 @@ fn write_bytes<T>(
     if dst < 0 || cap < 0 {
         return Err(HostError::InvalidParams);
     }
+    if src.len() > MAX_WASM_DATA_LEN {
+        return Err(HostError::DataFieldTooLarge);
+    }
     if src.len() > cap as usize {
         return Err(HostError::BufferTooSmall);
     }
+    charge_transfer(caller.data(), src.len())?;
     mem.write(&mut *caller, dst as usize, src)
         .map_err(|_| HostError::PointerOutOfBounds)?;
     Ok(src.len() as i32)

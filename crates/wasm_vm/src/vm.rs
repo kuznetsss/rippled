@@ -1,14 +1,60 @@
 use crate::imports::register_host_functions;
 use host_functions::HostFunctions;
+use std::cell::Cell;
 use std::sync::LazyLock;
-use wasmi::{Config, Engine, Linker, Module, Store};
+use wasmi::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
+
+/// wasm linear-memory page size, fixed by the wasm spec (64 KiB).
+const WASM_PAGE_BYTES: u32 = 64 * 1024;
+
+/// Linear-memory page cap.
+///
+/// Mirrors the C++ engine's cap: `maxPages = 128` in
+/// `include/xrpl/tx/wasm/WasmVM.h:23`, applied via
+/// `wasm_store_new_with_memory_max_pages(engine, maxPages)` in
+/// `src/libxrpl/tx/wasm/WasmiVM.cpp:540`. Growth beyond the cap traps (see
+/// `run_escrow`'s `trap_on_grow_failure(true)`).
+pub const MAX_MEMORY_PAGES: u32 = 128;
+
+/// Byte form of [`MAX_MEMORY_PAGES`]: `128 * 65536 = 8_388_608` (8 MiB).
+pub const MAX_MEMORY_BYTES: usize = (MAX_MEMORY_PAGES * WASM_PAGE_BYTES) as usize;
+
+/// Per-run transfer-limit budget: total bytes that may cross the host/guest
+/// boundary (via the `read_bytes`/`write_bytes` helpers in `abi.rs`) during
+/// one [`run_escrow`] invocation. A budget separate from gas.
+///
+/// Mirrors `kWasmTransferLimit = 1 << 20` in
+/// `include/xrpl/protocol/Protocol.h:264`, enforced by `checkTransfer` in
+/// `src/libxrpl/tx/wasm/HostFuncWrapper.cpp:86-99`.
+pub const TRANSFER_LIMIT_BYTES: u64 = 1 << 20;
 
 /// State threaded through every host call, stored in the wasmi [`Store`].
 pub struct VmState<'h> {
     pub(crate) host: &'h dyn HostFunctions,
+    /// Enforces [`MAX_MEMORY_BYTES`] via `Store::limiter` (see `run_escrow`).
+    /// Lives in `VmState` (rather than as a standalone local) because the
+    /// limiter callback wasmi holds must be able to produce a `&mut` into it
+    /// from `&mut VmState`.
+    pub(crate) mem_limits: StoreLimits,
+    /// Remaining transfer-limit budget for this run (see
+    /// [`TRANSFER_LIMIT_BYTES`]); decremented in `abi.rs`'s `read_bytes` /
+    /// `write_bytes` by the number of bytes actually moved.
+    ///
+    /// A `Cell`, not a plain `u64`: `AbiArg::read` (the guest -> host read
+    /// path) only has a shared `&Caller`, while `AbiRet::write` (the host ->
+    /// guest write path) has `&mut Caller` — both need to decrement this
+    /// counter, so it can't be an ordinary field mutated only through
+    /// `&mut`. The store (and this counter) is only ever touched from one
+    /// thread per invocation, so `Cell`'s lack of `Sync` is not an issue.
+    ///
+    /// NOTE: the C++ `unalignedGas`/`FieldLocator` alignment-copy charge
+    /// (`HostFuncWrapper.cpp:44,390-397`) is deferred — the PoC has no
+    /// `FieldLocator` host functions yet to attach it to.
+    pub(crate) transfer_budget: Cell<u64>,
 }
 
 /// Outcome of running an escrow contract to completion.
+#[derive(Debug)]
 pub struct RunOutcome {
     /// The value returned by the exported entry point (`finish`): `> 0` means
     /// allow the escrow to finish.
@@ -67,8 +113,23 @@ pub fn run_escrow<'h>(
     let engine = wasm_engine();
     let module = Module::new(engine, wasm).map_err(|e| format!("compile: {e}"))?;
 
-    let mut store = Store::new(engine, VmState { host });
+    let mem_limits = StoreLimitsBuilder::new()
+        .memory_size(MAX_MEMORY_BYTES)
+        .trap_on_grow_failure(true)
+        .build();
+    let mut store = Store::new(
+        engine,
+        VmState {
+            host,
+            mem_limits,
+            transfer_budget: Cell::new(TRANSFER_LIMIT_BYTES),
+        },
+    );
     store.set_fuel(gas).map_err(|e| format!("set_fuel: {e}"))?;
+    // Registers the memory-page cap; also applied at instantiation time (an
+    // initial memory declared past the cap fails instantiation, same as a
+    // `memory.grow` past it traps at runtime).
+    store.limiter(|state| &mut state.mem_limits);
 
     let mut linker = Linker::<VmState<'h>>::new(engine);
     register_host_functions(&mut linker)?;
