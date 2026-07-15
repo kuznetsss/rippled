@@ -22,15 +22,28 @@ rm -f conan.lock
 # Create a new lockfile that is compatible with Linux, macOS, and Windows. The
 # first create command will create a new lockfile, while the subsequent create
 # commands will merge any additional dependencies into the created lockfile.
+# --build="*" forces the resolver to treat every package as build-from-source,
+# which expands ALL build_requires (tool_requires) into the graph so they get
+# locked regardless of prebuilt-binary availability on the machine running this
+# script. Without it, a package whose binary happens to exist locally (e.g.
+# benchmark on macOS) has its tool_requires elided — notably benchmark's
+# cmake/[>=3.16.3 <4] — producing a lockfile that fails on platforms that must
+# build that package from source (e.g. Linux CI).
 conan lock create . \
     --options '&:jemalloc=True' \
     --options '&:rocksdb=True' \
+    --options '&:benchmarks=True' \
+    --build="*" \
     --profile:all=conan/lockfile/linux.profile
 conan lock create . \
     --options '&:jemalloc=True' \
     --options '&:rocksdb=True' \
+    --options '&:benchmarks=True' \
+    --build="*" \
     --profile:all=conan/lockfile/macos.profile
 conan lock create . \
     --options '&:jemalloc=True' \
     --options '&:rocksdb=True' \
+    --options '&:benchmarks=True' \
+    --build="*" \
     --profile:all=conan/lockfile/windows.profile

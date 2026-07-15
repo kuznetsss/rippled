@@ -15,6 +15,7 @@ class Xrpl(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     options = {
         "assertions": [True, False],
+        "benchmarks": [True, False],
         "coverage": [True, False],
         "fPIC": [True, False],
         "jemalloc": [True, False],
@@ -47,6 +48,7 @@ class Xrpl(ConanFile):
 
     default_options = {
         "assertions": False,
+        "benchmarks": False,
         "coverage": False,
         "fPIC": True,
         "jemalloc": False,
@@ -131,6 +133,12 @@ class Xrpl(ConanFile):
 
     def requirements(self):
         self.requires("boost/1.91.0", force=True, transitive_headers=True)
+        # google benchmark, for the wasm-VM head-to-head harness in
+        # src/bench. Version pinned to what was available in Conan Center at
+        # the time this was written; if 1.9.1 is no longer available, bump
+        # to whatever the latest compatible release is.
+        if self.options.benchmarks:
+            self.requires("benchmark/1.9.1")
         self.requires("date/3.0.4", transitive_headers=True)
         if self.options.jemalloc:
             self.requires("jemalloc/5.3.1")
@@ -163,6 +171,7 @@ class Xrpl(ConanFile):
     def generate(self):
         tc = CMakeToolchain(self)
         tc.variables["tests"] = self.options.tests
+        tc.variables["benchmarks"] = self.options.benchmarks
         tc.variables["assert"] = self.options.assertions
         tc.variables["coverage"] = self.options.coverage
         tc.variables["jemalloc"] = self.options.jemalloc

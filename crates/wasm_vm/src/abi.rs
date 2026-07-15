@@ -1,5 +1,5 @@
 use crate::vm::VmState;
-use host_functions::{HostError, HostFn, HostResult, HASH_LEN};
+use host_functions::{HostError, HostFn, HostResult};
 use wasmi::{Caller, Extern, Memory};
 
 // ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ impl AbiRet for Vec<u8> {
     }
 }
 
-impl AbiRet for [u8; HASH_LEN] {
+impl<const N: usize> AbiRet for [u8; N] {
     type Out = (i32, i32);
     fn write(self, c: &mut Caller<'_, VmState<'_>>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
         let mem = memory(c)?;
@@ -108,6 +108,7 @@ pub(crate) fn to_wasm_i32(r: HostResult<i64>) -> i32 {
         Err(e) => e.code(),
     }
 }
+#[allow(dead_code)]
 pub(crate) fn to_wasm_i64(r: HostResult<i64>) -> i64 {
     match r {
         Ok(v) => v,

@@ -461,15 +461,15 @@ dependencies = [
 
 [[package]]
 name = "wasmi"
-version = "1.1.0"
+version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2300d0f78cba12f14e29e8dd157ea64050c0a688179aefdb2050105805594a0c"
+checksum = "22bf475363d09d960b48275c4ea9403051add498a9d80c64dbc91edabab9d1d0"
 dependencies = [
  "spin",
  "wasmi_collections",
  "wasmi_core",
  "wasmi_ir",
- "wasmparser 0.239.0",
+ "wasmparser 0.228.0",
  "wat",
 ]
 
@@ -502,9 +502,9 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.239.0"
+version = "0.228.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c9d90bb93e764f6beabf1d02028c70a2156a6583e63ac4218dd07ef733368b0"
+checksum = "4abf1132c1fdf747d56bbc1bb52152400c70f336870f968b85e89ea422198ae3"
 dependencies = [
  "bitflags",
  "indexmap",

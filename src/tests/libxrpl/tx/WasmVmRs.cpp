@@ -15,15 +15,18 @@
 
 using namespace xrpl;
 
-// A wasm module whose `finish` export calls the `ldgr_index` host import and
-// returns it (i64 -> i32). Reused against both the SampleHost (Rust-side mock,
-// answers 7) and a C++ FakeHost (answers 42), since it's the same guest
-// program either way.
+// A wasm module whose `finish` export calls the `ldgr_index` host import
+// (which writes the 4-byte little-endian sequence number into guest memory at
+// offset 0 and returns the byte count) and returns the reassembled i32.
+// Reused against both the SampleHost (Rust-side mock, answers 7) and a C++
+// FakeHost (answers 42), since it's the same guest program either way.
 static constexpr std::string_view kLedgerSqnWat = R"wat(
     (module
-      (import "host" "ldgr_index" (func $ldgr_index (result i64)))
+      (import "host" "ldgr_index" (func $ldgr_index (param i32 i32) (result i32)))
+      (memory (export "memory") 1)
       (func (export "finish") (result i32)
-        (i32.wrap_i64 (call $ldgr_index))))
+        (drop (call $ldgr_index (i32.const 0) (i32.const 4)))
+        (i32.load (i32.const 0))))
 )wat";
 
 TEST(WasmVmRs, runs_escrow_against_mock_host)

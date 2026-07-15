@@ -51,8 +51,8 @@ mod tests {
     }
 
     impl HostFunctions for MockHost {
-        fn get_ledger_sqn(&self) -> HostResult<u32> {
-            Ok(self.ledger_sqn)
+        fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
+            Ok(self.ledger_sqn.to_le_bytes())
         }
 
         fn get_current_ledger_obj_field(&self, field_code: i32) -> HostResult<Vec<u8>> {
@@ -102,7 +102,7 @@ mod tests {
         // at offset 64, and return the first byte of that digest.
         let wat = r#"
             (module
-              (import "host" "ldgr_index"  (func $ldgr_index (result i64)))
+              (import "host" "ldgr_index"  (func $ldgr_index (param i32 i32) (result i32)))
               (import "host" "sha512_half" (func $sha512_half (param i32 i32 i32 i32) (result i32)))
               (import "host" "trace_num"   (func $trace_num (param i32 i32 i64) (result i32)))
               (memory (export "memory") 1)
@@ -110,7 +110,8 @@ mod tests {
               (data (i32.const 16) "sqn")
               (func (export "finish") (result i32)
                 (local $sqn i64)
-                (local.set $sqn (call $ldgr_index))
+                (drop (call $ldgr_index (i32.const 32) (i32.const 4)))
+                (local.set $sqn (i64.extend_i32_u (i32.load (i32.const 32))))
                 (drop (call $trace_num (i32.const 16) (i32.const 3) (local.get $sqn)))
                 (drop (call $sha512_half (i32.const 0) (i32.const 5) (i32.const 64) (i32.const 32)))
                 (i32.load8_u (i32.const 64)))
@@ -172,8 +173,8 @@ mod tests {
         }
 
         impl HostFunctions for BorrowingHost<'_> {
-            fn get_ledger_sqn(&self) -> HostResult<u32> {
-                Ok(9)
+            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
+                Ok(9u32.to_le_bytes())
             }
 
             fn get_current_ledger_obj_field(&self, _field_code: i32) -> HostResult<Vec<u8>> {
@@ -197,13 +198,14 @@ mod tests {
         // Guest: read the ledger sqn, pass it to trace_num, and return it.
         let wat = r#"
             (module
-              (import "host" "ldgr_index" (func $ldgr_index (result i64)))
+              (import "host" "ldgr_index" (func $ldgr_index (param i32 i32) (result i32)))
               (import "host" "trace_num"  (func $trace_num (param i32 i32 i64) (result i32)))
               (memory (export "memory") 1)
               (data (i32.const 0) "sqn")
               (func (export "finish") (result i32)
                 (local $s i64)
-                (local.set $s (call $ldgr_index))
+                (drop (call $ldgr_index (i32.const 16) (i32.const 4)))
+                (local.set $s (i64.extend_i32_u (i32.load (i32.const 16))))
                 (drop (call $trace_num (i32.const 0) (i32.const 3) (local.get $s)))
                 (i32.wrap_i64 (local.get $s))))
         "#;

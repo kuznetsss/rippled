@@ -45,7 +45,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 pub extern "C" fn finish() -> i32 {
     let host = GuestHost;
     let sqn = match host.get_ledger_sqn() {
-        Ok(s) => s,
+        Ok(s) => u32::from_le_bytes(s),
         Err(e) => return e.code(),
     };
     let _ = host.trace_num("ledger_sqn", sqn as i64);

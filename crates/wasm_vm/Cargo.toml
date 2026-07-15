@@ -9,7 +9,7 @@ edition.workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-wasmi = "1.1.0"
+wasmi = "=1.0.9"
 cxx.workspace = true
 host_functions = { path = "../host_functions" }
 # Compiles WebAssembly text (WAT) to wasm bytes. Used by the `compile_wat` cxx

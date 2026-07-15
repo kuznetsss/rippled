@@ -27,80 +27,101 @@ namespace xrpl {
 // must be gated by an amendment.
 // See XLS-0102 §6.5 (Future-Proofing):
 // https://github.com/XRPLF/XRPL-Standards/tree/master/XLS-0102-wasm-vm#65-future-proofing
+// BENCH: This function's body is temporarily stripped down to registering
+// only the 5 host functions the Rust wasm_vm PoC engine implements (see
+// src/bench/wasm/WasmEngineBench.cpp and CLAUDE.md's "WASM-VM Rust redesign
+// PoC" section). Instantiation — including import resolution — happens
+// inside the timed region for both engines, so a fair per-call comparison
+// requires the C++ engine to expose the SAME import surface the Rust side
+// does; registering all ~60 production imports here would bias the C++
+// engine's numbers with resolution work the Rust engine never pays for.
+// Every import below except the 5 kept for the benchmark is commented out
+// under a `// BENCH: disabled ...` marker — restore them (delete the
+// markers, uncomment the lines) to get back the full production behavior.
+// NOTE: this WILL break other escrow/wasm tests that call host functions
+// outside this set of 5 — that is expected and accepted on this benchmark
+// branch; this change is not meant to be merged as-is.
 static void
 setCommonHostFunctions(HostFunctions& hfs, ImportVec& i)
 {
     // clang-format off
     WASM_IMPORT_FUNC2(i, getLedgerSqn, "ldgr_index", hfs,                                                      60);
-    WASM_IMPORT_FUNC2(i, getParentLedgerTime, "parent_ldgr_time", hfs,                                         60);
-    WASM_IMPORT_FUNC2(i, getParentLedgerHash, "parent_ldgr_hash", hfs,                                         60);
-    WASM_IMPORT_FUNC2(i, getBaseFee, "base_fee", hfs,                                                          60);
-    WASM_IMPORT_FUNC2(i, isAmendmentEnabled, "amendment_enabled", hfs,                                        100);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, getParentLedgerTime, "parent_ldgr_time", hfs,                                         60);
+    // WASM_IMPORT_FUNC2(i, getParentLedgerHash, "parent_ldgr_hash", hfs,                                         60);
+    // WASM_IMPORT_FUNC2(i, getBaseFee, "base_fee", hfs,                                                          60);
+    // WASM_IMPORT_FUNC2(i, isAmendmentEnabled, "amendment_enabled", hfs,                                        100);
 
-    WASM_IMPORT_FUNC2(i, cacheLedgerObj, "cache_le", hfs,                                                   5'000);
-    WASM_IMPORT_FUNC2(i, getTxField, "tx_field", hfs,                                                          70);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, cacheLedgerObj, "cache_le", hfs,                                                   5'000);
+    // WASM_IMPORT_FUNC2(i, getTxField, "tx_field", hfs,                                                          70);
     WASM_IMPORT_FUNC2(i, getCurrentLedgerObjField, "home_le_field", hfs,                                       70);
-    WASM_IMPORT_FUNC2(i, getLedgerObjField, "le_field", hfs,                                                   70);
-    WASM_IMPORT_FUNC2(i, getTxNestedField, "tx_inner", hfs,                                                   110);
-    WASM_IMPORT_FUNC2(i, getCurrentLedgerObjNestedField, "home_le_inner", hfs,                                110);
-    WASM_IMPORT_FUNC2(i, getLedgerObjNestedField, "le_inner", hfs,                                            110);
-    WASM_IMPORT_FUNC2(i, getTxArrayLen, "tx_arr_len", hfs,                                                     40);
-    WASM_IMPORT_FUNC2(i, getCurrentLedgerObjArrayLen, "home_le_arr_len", hfs,                                  40);
-    WASM_IMPORT_FUNC2(i, getLedgerObjArrayLen, "le_arr_len", hfs,                                              40);
-    WASM_IMPORT_FUNC2(i, getTxNestedArrayLen, "tx_inner_arr_len", hfs,                                         70);
-    WASM_IMPORT_FUNC2(i, getCurrentLedgerObjNestedArrayLen, "home_le_inner_arr_len", hfs,                      70);
-    WASM_IMPORT_FUNC2(i, getLedgerObjNestedArrayLen, "le_inner_arr_len", hfs,                                  70);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, getLedgerObjField, "le_field", hfs,                                                   70);
+    // WASM_IMPORT_FUNC2(i, getTxNestedField, "tx_inner", hfs,                                                   110);
+    // WASM_IMPORT_FUNC2(i, getCurrentLedgerObjNestedField, "home_le_inner", hfs,                                110);
+    // WASM_IMPORT_FUNC2(i, getLedgerObjNestedField, "le_inner", hfs,                                            110);
+    // WASM_IMPORT_FUNC2(i, getTxArrayLen, "tx_arr_len", hfs,                                                     40);
+    // WASM_IMPORT_FUNC2(i, getCurrentLedgerObjArrayLen, "home_le_arr_len", hfs,                                  40);
+    // WASM_IMPORT_FUNC2(i, getLedgerObjArrayLen, "le_arr_len", hfs,                                              40);
+    // WASM_IMPORT_FUNC2(i, getTxNestedArrayLen, "tx_inner_arr_len", hfs,                                         70);
+    // WASM_IMPORT_FUNC2(i, getCurrentLedgerObjNestedArrayLen, "home_le_inner_arr_len", hfs,                      70);
+    // WASM_IMPORT_FUNC2(i, getLedgerObjNestedArrayLen, "le_inner_arr_len", hfs,                                  70);
 
-    WASM_IMPORT_FUNC2(i, checkSignature, "check_sig", hfs,                                                    300);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, checkSignature, "check_sig", hfs,                                                    300);
     WASM_IMPORT_FUNC2(i, computeSha512HalfHash, "sha512_half", hfs,                                          2000);
 
-    WASM_IMPORT_FUNC2(i, accountKeylet, "accountroot_id", hfs,                                                350);
-    WASM_IMPORT_FUNC2(i, ammKeylet, "amm_id", hfs,                                                            450);
-    WASM_IMPORT_FUNC2(i, checkKeylet, "check_id", hfs,                                                        350);
-    WASM_IMPORT_FUNC2(i, credentialKeylet, "credential_id", hfs,                                              350);
-    WASM_IMPORT_FUNC2(i, delegateKeylet, "delegate_id", hfs,                                                  350);
-    WASM_IMPORT_FUNC2(i, depositPreauthKeylet, "deposit_preauth_id", hfs,                                     350);
-    WASM_IMPORT_FUNC2(i, didKeylet, "did_id", hfs,                                                            350);
-    WASM_IMPORT_FUNC2(i, escrowKeylet, "escrow_id", hfs,                                                      350);
-    WASM_IMPORT_FUNC2(i, lineKeylet, "trustline_id", hfs,                                                     400);
-    WASM_IMPORT_FUNC2(i, mptIssuanceKeylet, "mpt_issuance_id", hfs,                                           350);
-    WASM_IMPORT_FUNC2(i, mptokenKeylet, "mptoken_id", hfs,                                                    500);
-    WASM_IMPORT_FUNC2(i, nftOfferKeylet, "nft_offer_id", hfs,                                                 350);
-    WASM_IMPORT_FUNC2(i, offerKeylet, "offer_id", hfs,                                                        350);
-    WASM_IMPORT_FUNC2(i, oracleKeylet, "oracle_id", hfs,                                                      350);
-    WASM_IMPORT_FUNC2(i, paychanKeylet, "paychan_id", hfs,                                                    350);
-    WASM_IMPORT_FUNC2(i, permissionedDomainKeylet, "permissioned_domain_id", hfs,                             350);
-    WASM_IMPORT_FUNC2(i, signersKeylet, "signers_id", hfs,                                                    350);
-    WASM_IMPORT_FUNC2(i, ticketKeylet, "ticket_id", hfs,                                                      350);
-    WASM_IMPORT_FUNC2(i, vaultKeylet, "vault_id", hfs,                                                        350);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, accountKeylet, "accountroot_id", hfs,                                                350);
+    // WASM_IMPORT_FUNC2(i, ammKeylet, "amm_id", hfs,                                                            450);
+    // WASM_IMPORT_FUNC2(i, checkKeylet, "check_id", hfs,                                                        350);
+    // WASM_IMPORT_FUNC2(i, credentialKeylet, "credential_id", hfs,                                              350);
+    // WASM_IMPORT_FUNC2(i, delegateKeylet, "delegate_id", hfs,                                                  350);
+    // WASM_IMPORT_FUNC2(i, depositPreauthKeylet, "deposit_preauth_id", hfs,                                     350);
+    // WASM_IMPORT_FUNC2(i, didKeylet, "did_id", hfs,                                                            350);
+    // WASM_IMPORT_FUNC2(i, escrowKeylet, "escrow_id", hfs,                                                      350);
+    // WASM_IMPORT_FUNC2(i, lineKeylet, "trustline_id", hfs,                                                     400);
+    // WASM_IMPORT_FUNC2(i, mptIssuanceKeylet, "mpt_issuance_id", hfs,                                           350);
+    // WASM_IMPORT_FUNC2(i, mptokenKeylet, "mptoken_id", hfs,                                                    500);
+    // WASM_IMPORT_FUNC2(i, nftOfferKeylet, "nft_offer_id", hfs,                                                 350);
+    // WASM_IMPORT_FUNC2(i, offerKeylet, "offer_id", hfs,                                                        350);
+    // WASM_IMPORT_FUNC2(i, oracleKeylet, "oracle_id", hfs,                                                      350);
+    // WASM_IMPORT_FUNC2(i, paychanKeylet, "paychan_id", hfs,                                                    350);
+    // WASM_IMPORT_FUNC2(i, permissionedDomainKeylet, "permissioned_domain_id", hfs,                             350);
+    // WASM_IMPORT_FUNC2(i, signersKeylet, "signers_id", hfs,                                                    350);
+    // WASM_IMPORT_FUNC2(i, ticketKeylet, "ticket_id", hfs,                                                      350);
+    // WASM_IMPORT_FUNC2(i, vaultKeylet, "vault_id", hfs,                                                        350);
 
-    WASM_IMPORT_FUNC2(i, getNFT, "nft_uri", hfs,                                                            5'000);
-    WASM_IMPORT_FUNC2(i, getNFTIssuer, "nft_issuer", hfs,                                                      70);
-    WASM_IMPORT_FUNC2(i, getNFTTaxon, "nft_taxon", hfs,                                                        60);
-    WASM_IMPORT_FUNC2(i, getNFTFlags, "nft_flags", hfs,                                                        60);
-    WASM_IMPORT_FUNC2(i, getNFTTransferFee, "nft_xfer_fee", hfs,                                               60);
-    WASM_IMPORT_FUNC2(i, getNFTSerial, "nft_serial", hfs,                                                      60);
+    // WASM_IMPORT_FUNC2(i, getNFT, "nft_uri", hfs,                                                            5'000);
+    // WASM_IMPORT_FUNC2(i, getNFTIssuer, "nft_issuer", hfs,                                                      70);
+    // WASM_IMPORT_FUNC2(i, getNFTTaxon, "nft_taxon", hfs,                                                        60);
+    // WASM_IMPORT_FUNC2(i, getNFTFlags, "nft_flags", hfs,                                                        60);
+    // WASM_IMPORT_FUNC2(i, getNFTTransferFee, "nft_xfer_fee", hfs,                                               60);
+    // WASM_IMPORT_FUNC2(i, getNFTSerial, "nft_serial", hfs,                                                      60);
 
     WASM_IMPORT_FUNC (i, trace, hfs,                                                                          500);
     WASM_IMPORT_FUNC2(i, traceNum, "trace_num", hfs,                                                          500);
-    WASM_IMPORT_FUNC2(i, traceAccount, "trace_acct", hfs,                                                     500);
-    WASM_IMPORT_FUNC2(i, traceFloat, "trace_xfloat", hfs,                                                     500);
-    WASM_IMPORT_FUNC2(i, traceAmount, "trace_amt", hfs,                                                       500);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, traceAccount, "trace_acct", hfs,                                                     500);
+    // WASM_IMPORT_FUNC2(i, traceFloat, "trace_xfloat", hfs,                                                     500);
+    // WASM_IMPORT_FUNC2(i, traceAmount, "trace_amt", hfs,                                                       500);
 
-    WASM_IMPORT_FUNC2(i, floatFromInt, "float_from_int", hfs,                                                 100);
-    WASM_IMPORT_FUNC2(i, floatFromUint, "float_from_uint", hfs,                                               130);
-    WASM_IMPORT_FUNC2(i, floatFromSTAmount, "float_from_stamount", hfs,                                       150);
-    WASM_IMPORT_FUNC2(i, floatFromSTNumber, "float_from_stnumber", hfs,                                       150);
-    WASM_IMPORT_FUNC2(i, floatToInt, "float_to_int", hfs,                                                     130);
-    WASM_IMPORT_FUNC2(i, floatToMantExp, "float_to_mant_exp", hfs,                                            130);
-    WASM_IMPORT_FUNC2(i, floatFromMantExp, "float_from_mant_exp", hfs,                                        100);
-    WASM_IMPORT_FUNC2(i, floatCompare, "float_cmp", hfs,                                                       80);
-    WASM_IMPORT_FUNC2(i, floatAdd, "float_add", hfs,                                                          160);
-    WASM_IMPORT_FUNC2(i, floatSubtract, "float_sub", hfs,                                                     160);
-    WASM_IMPORT_FUNC2(i, floatMultiply, "float_mult", hfs,                                                    300);
-    WASM_IMPORT_FUNC2(i, floatDivide, "float_div", hfs,                                                       300);
-    WASM_IMPORT_FUNC2(i, floatRoot, "float_root", hfs,                                                      5'500);
-    WASM_IMPORT_FUNC2(i, floatPower, "float_pow", hfs,                                                      5'500);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, floatFromInt, "float_from_int", hfs,                                                 100);
+    // WASM_IMPORT_FUNC2(i, floatFromUint, "float_from_uint", hfs,                                               130);
+    // WASM_IMPORT_FUNC2(i, floatFromSTAmount, "float_from_stamount", hfs,                                       150);
+    // WASM_IMPORT_FUNC2(i, floatFromSTNumber, "float_from_stnumber", hfs,                                       150);
+    // WASM_IMPORT_FUNC2(i, floatToInt, "float_to_int", hfs,                                                     130);
+    // WASM_IMPORT_FUNC2(i, floatToMantExp, "float_to_mant_exp", hfs,                                            130);
+    // WASM_IMPORT_FUNC2(i, floatFromMantExp, "float_from_mant_exp", hfs,                                        100);
+    // WASM_IMPORT_FUNC2(i, floatCompare, "float_cmp", hfs,                                                       80);
+    // WASM_IMPORT_FUNC2(i, floatAdd, "float_add", hfs,                                                          160);
+    // WASM_IMPORT_FUNC2(i, floatSubtract, "float_sub", hfs,                                                     160);
+    // WASM_IMPORT_FUNC2(i, floatMultiply, "float_mult", hfs,                                                    300);
+    // WASM_IMPORT_FUNC2(i, floatDivide, "float_div", hfs,                                                       300);
+    // WASM_IMPORT_FUNC2(i, floatRoot, "float_root", hfs,                                                      5'500);
+    // WASM_IMPORT_FUNC2(i, floatPower, "float_pow", hfs,                                                      5'500);
     // clang-format on
 }
 
@@ -110,7 +131,8 @@ createWasmImport(HostFunctions& hfs)
     ImportVec i;
 
     setCommonHostFunctions(hfs, i);
-    WASM_IMPORT_FUNC2(i, updateData, "set_data", hfs, 1000);
+    // BENCH: disabled for PoC-parity benchmark (not implemented in Rust engine) — restore to re-enable
+    // WASM_IMPORT_FUNC2(i, updateData, "set_data", hfs, 1000);
 
     return i;
 }

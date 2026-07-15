@@ -24,6 +24,7 @@ target_include_directories(xrpl_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 # rs_wasm_vm_cxxbridge (used by tx/WasmVmRs.cpp) comes in transitively through
 # xrpl.libxrpl, whose tx module links it PUBLIC — no explicit link needed.
 target_link_libraries(xrpl_tests PRIVATE GTest::gtest xrpl.libxrpl)
+xrpl_dedupe_rust_std(xrpl_tests)
 
 # One source subdirectory per module. Network unit tests are currently not
 # supported on Windows.

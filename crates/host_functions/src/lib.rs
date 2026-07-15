@@ -130,17 +130,18 @@ pub struct HostFnSpec {
 //
 // The PoC exposes five functions, each chosen to exercise a distinct ABI
 // shape:
-// * `get_ledger_sqn` — scalar out, ledger read (needs host context);
+// * `get_ledger_sqn` — fixed-size buffer out (4-byte little-endian serialized
+//   sequence number), ledger read (needs host context);
 // * `get_current_ledger_obj_field` — read a scalar in, return a
 //   variable-length byte buffer;
 // * `sha512_half` — read a byte slice, return a fixed-size buffer (a pure
 //   function, later forwarded to C++);
 // * `trace` / `trace_num` — read a byte slice in, return nothing (debug).
 host_abi! {
-    /// Sequence number of the current ledger.
+    /// Sequence number of the current ledger, as its 4 little-endian bytes.
     #[gas = 60]
     #[wasm = "ldgr_index"]
-    fn get_ledger_sqn() -> u32;
+    fn get_ledger_sqn() -> [u8; 4];
 
     /// Serialized bytes of a field on the current (escrow) ledger object.
     #[gas = 70]
@@ -172,8 +173,8 @@ mod tests {
     struct Dummy;
 
     impl HostFunctions for Dummy {
-        fn get_ledger_sqn(&self) -> HostResult<u32> {
-            Ok(0)
+        fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
+            Ok([0; 4])
         }
 
         fn get_current_ledger_obj_field(&self, _field: i32) -> HostResult<Vec<u8>> {

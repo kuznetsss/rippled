@@ -85,8 +85,8 @@ use host_functions::{HASH_LEN, HostError, HostFunctions, HostResult};
 struct SampleHost;
 
 impl HostFunctions for SampleHost {
-    fn get_ledger_sqn(&self) -> HostResult<u32> {
-        Ok(7)
+    fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
+        Ok(7u32.to_le_bytes())
     }
 
     fn get_current_ledger_obj_field(&self, _field: i32) -> HostResult<Vec<u8>> {
@@ -137,12 +137,12 @@ struct CxxHost<'a> {
 }
 
 impl HostFunctions for CxxHost<'_> {
-    fn get_ledger_sqn(&self) -> HostResult<u32> {
+    fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
         let v = self.ctx.get_ledger_sqn();
         if v < 0 {
             Err(HostError::from_code(v as i32))
         } else {
-            Ok(v as u32)
+            Ok((v as u32).to_le_bytes())
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::abi::{AbiArg, AbiRet, charged, to_wasm_i32, to_wasm_i64};
+use crate::abi::{AbiArg, AbiRet, charged, to_wasm_i32};
 use crate::vm::VmState;
 use host_functions::{HASH_LEN, HostFn};
 use wasmi::{Caller, Linker};
@@ -30,10 +30,10 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
             HostFn::GetLedgerSqn => linker.func_wrap(
                 HOST_MODULE,
                 op.spec().name,
-                |mut caller: Caller<'_, VmState<'_>>| -> i64 {
-                    to_wasm_i64(charged(&mut caller, HostFn::GetLedgerSqn, |c| {
+                |mut caller: Caller<'_, VmState<'_>>, out_ptr: i32, out_len: i32| -> i32 {
+                    to_wasm_i32(charged(&mut caller, HostFn::GetLedgerSqn, |c| {
                         let __ret = c.data().host.get_ledger_sqn()?;
-                        <u32 as AbiRet>::write(__ret, c, ())
+                        <[u8; 4] as AbiRet>::write(__ret, c, (out_ptr, out_len))
                     }))
                 },
             ),

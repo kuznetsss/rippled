@@ -65,4 +65,24 @@ runEscrowWasmRsFromWatWithCxxHost(
     return {r.result, r.fuel_used};
 }
 
+// Run already-assembled wasm `code` through the Rust engine, servicing host
+// calls via a C++ HostContext wrapping `hf`. Unlike
+// `runEscrowWasmRsFromWatWithCxxHost`, this takes pre-assembled bytes instead
+// of WAT text, so callers that need to assemble once and run many times (e.g.
+// a benchmark driving the real per-run entry point repeatedly) don't pay
+// WAT-parsing cost inside the timed region.
+inline EscrowRunResult
+runEscrowWasmRsWithCxxHost(
+    std::vector<std::uint8_t> const& code,
+    xrpl::HostFunctions& hf,
+    std::uint64_t gas)
+{
+    HostContext ctx{hf};
+    auto const r = rs::wasm_vm::run_escrow_with_cxx_host(
+        ctx,
+        rust::Slice<std::uint8_t const>(code.data(), code.size()),
+        gas);
+    return {r.result, r.fuel_used};
+}
+
 }  // namespace xrpl::wasmrs

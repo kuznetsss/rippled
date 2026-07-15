@@ -201,14 +201,23 @@ target_link_libraries(
 
 add_module(xrpl tx)
 target_link_libraries(xrpl.libxrpl.tx PUBLIC xrpl.libxrpl.ledger)
-# The wasm-rs bridge shim (src/libxrpl/tx/wasm-rs/HostContext.cpp) forwards the
-# Rust engine's host calls back to xrpl::HostFunctions. It needs the generated
-# cxxbridge headers (rs_wasm_vm_cxxbridge/ffi.h, rust/cxx.h) on its include path;
-# PUBLIC so consumers of the wasm-rs public headers (WasmVmRs.h / HostContext.h)
-# get them too. The bridge declares no dependency back on xrpl, so this is not a
-# target cycle: the bridge's undefined HostContext symbols resolve at the final
-# executable link, where HostContext.o (in xrpl.libxrpl) is present.
-target_link_libraries(xrpl.libxrpl.tx PUBLIC rs_wasm_vm_cxxbridge)
+# The wasm-rs bridge shim (src/libxrpl/tx/wasm-rs/HostContext.cpp, compiled into
+# this tx module) forwards the Rust engine's host calls back to
+# xrpl::HostFunctions, and it #includes the generated cxxbridge headers
+# (rs_wasm_vm_cxxbridge/ffi.h, rust/cxx.h). So tx needs those headers on its
+# include path and must build after they are generated -- but it must NOT *link*
+# the bridge: the bridge's ffi.cpp calls back into xrpl::wasmrs::HostContext,
+# whose definition lives in libxrpl, making libxrpl and the bridge mutually
+# dependent (closed explicitly below). If tx -- an OBJECT library -- linked the
+# bridge, it would sit inside that link cycle, and CMake allows link cycles only
+# among STATIC libraries. So give tx just the bridge's usage requirements (its
+# include dirs) plus a build-order dependency, and let the aggregate
+# xrpl.libxrpl carry the actual link (below).
+target_include_directories(
+    xrpl.libxrpl.tx
+    PRIVATE $<TARGET_PROPERTY:rs_wasm_vm_cxxbridge,INTERFACE_INCLUDE_DIRECTORIES>
+)
+add_dependencies(xrpl.libxrpl.tx rs_wasm_vm_cxxbridge)
 
 add_library(xrpl.libxrpl)
 set_target_properties(xrpl.libxrpl PROPERTIES OUTPUT_NAME xrpl)
@@ -244,6 +253,29 @@ target_link_modules(
     shamap
     tx
 )
+
+# The wasm-rs bridge and xrpl.libxrpl are mutually dependent STATIC libraries:
+# libxrpl exposes the bridge (its tx module includes WasmVmRs.h; consumers reach
+# the Rust engine through it), and the bridge's generated ffi.cpp calls back into
+# xrpl::wasmrs::HostContext, whose definition (HostContext.o) is archived into
+# libxrpl.a via the tx module. Declare BOTH edges so CMake knows it is a cycle.
+#
+# Why it matters: without the back-edge a consumer's link line is
+# `... libxrpl.a ... rs_wasm_vm_cxxbridge.a ...` (libxrpl pulls the bridge, so it
+# comes first). Apple's ld64 resolves all archives as one group and links fine,
+# but GNU ld scans each archive once, left to right: by the time it reaches the
+# bridge and discovers the HostContext refs, libxrpl.a is already behind it and
+# HostContext.o is never extracted -> "undefined reference" at link. Declaring
+# the cycle makes CMake repeat libxrpl.a after the bridge on the link line, so
+# GNU ld can extract HostContext.o on the second pass.
+#
+# The cycle is between two STATIC libraries only (the tx OBJECT library is kept
+# out of it -- see the tx include-dir note above), which CMake permits; static
+# link cycles impose no build-order cycle, so this is safe. INTERFACE on the
+# back-edge: the bridge target itself links nothing, it only needs libxrpl to
+# reach the final executable's link line through every bridge consumer.
+target_link_libraries(xrpl.libxrpl PUBLIC rs_wasm_vm_cxxbridge)
+target_link_libraries(rs_wasm_vm_cxxbridge INTERFACE xrpl.libxrpl)
 
 # All headers in libxrpl are in modules.
 # Uncomment this stanza if you have not yet moved new headers into a module.
@@ -285,6 +317,10 @@ if(xrpld)
         target_sources(xrpld PRIVATE ${sources})
 
         target_link_libraries(xrpld rs_hello_world_cxxbridge)
+        # rs_hello_world's corrosion staticlib bundles its own Rust std copy,
+        # duplicating symbols already pulled in by wasm_vm (see below) --
+        # only weaken it here, where it's actually linked.
+        xrpl_dedupe_rust_std(xrpld CRATES rs_hello_world)
     endif()
 
     # rs_wasm_vm_cxxbridge (the Rust wasm-vm engine + the wasm-rs HostContext
@@ -294,6 +330,9 @@ if(xrpld)
     # path calls the Rust engine yet), but promoting the shim into xrpl.libxrpl
     # is what lets it live in src/ instead of the test tree.
     target_link_libraries(xrpld Xrpl::boost Xrpl::opts Xrpl::libs xrpl.libxrpl)
+    # Duplicates conan wasmi's Rust std runtime symbols against our corrosion
+    # wasm_vm archive -- see cmake/XrplRustStdDedup.cmake.
+    xrpl_dedupe_rust_std(xrpld CRATES wasm_vm)
     exclude_if_included(xrpld)
     # define a macro for tests that might need to
     # be excluded or run differently in CI environment
