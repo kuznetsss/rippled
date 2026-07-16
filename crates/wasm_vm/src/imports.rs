@@ -1,4 +1,4 @@
-use crate::abi::{AbiArg, AbiRet, charged, read_borrowed, to_wasm_i32, write_into};
+use crate::abi::{AbiRet, charged, read_borrowed, read_write, to_wasm_i32, write_into};
 use crate::vm::VmState;
 use host_functions::{HostError, HostFn};
 use wasmi::{Caller, Linker};
@@ -71,11 +71,12 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
                  out_len: i32|
                  -> i32 {
                     to_wasm_i32(charged(&mut caller, HostFn::Sha512Half, |c| {
-                        // Read the input up front (owned copy), then let the
-                        // host write the 32-byte digest straight into the guest
-                        // output region.
-                        let data = <Vec<u8> as AbiArg>::read(c, (data_ptr, data_len))?;
-                        write_into(c, out_ptr, out_len, |host, out| host.sha512_half(&data, out))
+                        // Input copied into a stack buffer (no heap), output
+                        // written straight into guest memory; `read_write`
+                        // owns the read/write bounds/cap/transfer policy.
+                        read_write(c, data_ptr, data_len, out_ptr, out_len, |host, data, out| {
+                            host.sha512_half(data, out)
+                        })
                     }))
                 },
             ),

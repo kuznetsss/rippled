@@ -9,41 +9,6 @@ use wasmi::{Caller, Extern, Memory};
 // (`charged`) so every registered closure pays for its call exactly once.
 // ---------------------------------------------------------------------------
 
-/// Decode one host-function argument from the wasm scalar(s) the guest passed,
-/// reading guest memory for slice/string types. `Raw` is the wasm scalar shape:
-/// `i32`/`i64` for a plain scalar, `(i32, i32)` for a (ptr, len) pair.
-pub(crate) trait AbiArg: Sized {
-    type Raw;
-    fn read(caller: &Caller<'_, VmState<'_>>, raw: Self::Raw) -> HostResult<Self>;
-}
-
-impl AbiArg for i32 {
-    type Raw = i32;
-    fn read(_c: &Caller<'_, VmState<'_>>, r: i32) -> HostResult<Self> {
-        Ok(r)
-    }
-}
-impl AbiArg for i64 {
-    type Raw = i64;
-    fn read(_c: &Caller<'_, VmState<'_>>, r: i64) -> HostResult<Self> {
-        Ok(r)
-    }
-}
-impl AbiArg for bool {
-    type Raw = i32;
-    fn read(_c: &Caller<'_, VmState<'_>>, r: i32) -> HostResult<Self> {
-        Ok(r != 0)
-    }
-}
-
-impl AbiArg for Vec<u8> {
-    type Raw = (i32, i32);
-    fn read(c: &Caller<'_, VmState<'_>>, (ptr, len): (i32, i32)) -> HostResult<Self> {
-        let mem = memory(c)?;
-        read_bytes(c, &mem, ptr, len)
-    }
-}
-
 /// Encode a *scalar or unit* host-function result into the status the wasm fn
 /// returns (>= 0 success — a value; < 0 a HostError code, via `to_wasm_*`).
 /// `Out` is the extra wasm scalars for output — always `()` here, since these
@@ -143,33 +108,6 @@ fn memory<T>(caller: &Caller<'_, T>) -> Result<Memory, HostError> {
     }
 }
 
-/// Copy `len` bytes out of guest memory at `ptr`.
-///
-/// Checks are ordered to match the C++ host-call sequence: params validity,
-/// then the [`MAX_WASM_DATA_LEN`] size cap (`DataFieldTooLarge`), then the
-/// transfer-limit budget (`OutOfTransferLimit`) — all *before* allocating the
-/// output buffer or touching guest memory, so an oversized/over-budget `len`
-/// never drives an allocation.
-fn read_bytes(
-    caller: &Caller<'_, VmState<'_>>,
-    mem: &Memory,
-    ptr: i32,
-    len: i32,
-) -> Result<Vec<u8>, HostError> {
-    if ptr < 0 || len < 0 {
-        return Err(HostError::InvalidParams);
-    }
-    let len = len as usize;
-    if len > MAX_WASM_DATA_LEN {
-        return Err(HostError::DataFieldTooLarge);
-    }
-    charge_transfer(caller.data(), len)?;
-    let mut buf = vec![0u8; len];
-    mem.read(caller, ptr as usize, &mut buf)
-        .map_err(|_| HostError::PointerOutOfBounds)?;
-    Ok(buf)
-}
-
 /// Bounds-check `[ptr, ptr + len)` and return a `&[u8]` **aliasing guest linear
 /// memory** — no allocation, no copy. The read analog of [`write_into`]: where
 /// `write_into` hands the host a `&mut [u8]` into guest memory, this hands it a
@@ -179,8 +117,8 @@ fn read_bytes(
 /// the host call it feeds — the same leaf-call invariant `write_into` relies on
 /// (our host functions don't re-enter the guest and move its memory).
 ///
-/// Checks match [`read_bytes`]: params validity, the [`MAX_WASM_DATA_LEN`] size
-/// cap (`DataFieldTooLarge`), then the transfer-limit budget — all before the
+/// Checks, in order: params validity, the [`MAX_WASM_DATA_LEN`] size cap
+/// (`DataFieldTooLarge`), then the transfer-limit budget — all before the
 /// slice is formed.
 pub(crate) fn read_borrowed<'a>(
     caller: &'a Caller<'_, VmState<'_>>,
@@ -254,4 +192,56 @@ pub(crate) fn write_into(
     }
     charge_transfer(caller.data(), n)?;
     Ok(n as i64)
+}
+
+// The input buffer in `read_write` lives on the stack, sized to the field cap.
+// Guard the assumption that the cap stays small enough for that to be fine.
+const _: () = assert!(
+    MAX_WASM_DATA_LEN <= 8 * 1024,
+    "read_write's input buffer is a stack array; keep MAX_WASM_DATA_LEN small"
+);
+
+/// Service a host call that reads an input region *and* writes an output region
+/// of guest memory (e.g. `sha512_half`).
+///
+/// The input is copied into a fixed **stack** buffer — no heap allocation. It's
+/// bounded by [`MAX_WASM_DATA_LEN`] (the 1 KiB field cap, checked before the
+/// copy), so a plain `[u8; MAX_WASM_DATA_LEN]` array always fits; `&buf[..len]`
+/// carries the length, so no wrapper type is needed. Keeping the input in a
+/// stack local — rather than a borrow of the wasmi store — is what lets it
+/// coexist with the output `&mut [u8]`: [`write_into`] can borrow guest memory
+/// mutably for the output while `input` (borrowing the local) stays valid, with
+/// no aliasing/split reasoning. The output half reuses [`write_into`] verbatim,
+/// so the field-cap / buffer-fit / transfer policy is unchanged.
+///
+/// (The stack buffer is zero-initialized each call — one `memset` of the cap
+/// size. That's the deliberately-simple PoC trade: it drops the per-call heap
+/// allocation the old `Vec<u8>` path paid, at the price of a small fixed
+/// zero-fill; a `MaybeUninit`/arrayvec buffer could drop that too.)
+pub(crate) fn read_write(
+    caller: &mut Caller<'_, VmState<'_>>,
+    src: i32,
+    src_len: i32,
+    dst: i32,
+    cap: i32,
+    call: impl FnOnce(&dyn HostFunctions, &[u8], &mut [u8]) -> HostResult<usize>,
+) -> HostResult<i64> {
+    if src < 0 || src_len < 0 {
+        return Err(HostError::InvalidParams);
+    }
+    let len = src_len as usize;
+    if len > MAX_WASM_DATA_LEN {
+        return Err(HostError::DataFieldTooLarge);
+    }
+    charge_transfer(caller.data(), len)?;
+
+    // Copy the input into a stack buffer, then release the (shared) store
+    // borrow before `write_into` takes it mutably for the output.
+    let mut buf = [0u8; MAX_WASM_DATA_LEN];
+    memory(caller)?
+        .read(&*caller, src as usize, &mut buf[..len])
+        .map_err(|_| HostError::PointerOutOfBounds)?;
+    let input = &buf[..len];
+
+    write_into(caller, dst, cap, |host, out| call(host, input, out))
 }
