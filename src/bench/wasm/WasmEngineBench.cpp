@@ -57,6 +57,17 @@ using namespace xrpl;
 // wall-clock time, not gas consumption.
 constexpr std::uint64_t GAS = 1'000'000'000ull;
 
+// The largest single value the ABI lets a host function move across the
+// host/guest boundary in one call: the per-field size cap
+// (`kMaxWasmDataLength` = 1 KiB). The large-payload benchmarks below move
+// exactly this much per call, so comparing them against their small-payload
+// namesakes isolates the per-byte host<->guest I/O cost from the fixed
+// per-call overhead. For the Rust engine this is the direct-write path (C++
+// `memcpy`s straight into guest linear memory, no `rust::Vec`/result struct
+// marshaled across cxx), so a Rust-vs-C++ delta that tracks the C++ delta is
+// the "no cxx I/O overhead" result the team is after.
+constexpr std::size_t kLargeFieldBytes = 1024;
+
 // Minimal C++ mock of `xrpl::HostFunctions` with trivial constant returns --
 // the whole point is to measure engine + binding overhead, not the cost of
 // any real primitive (ledger lookups, SHA-512, etc). Shared by both engines:
@@ -64,6 +75,11 @@ constexpr std::uint64_t GAS = 1'000'000'000ull;
 // the C++ engine calls it directly through the `xrpl::HostFunctions` vtable.
 struct FakeHost : HostFunctions
 {
+    // Size of the buffer `getCurrentLedgerObjField` returns. Tiny by default
+    // (the per-call-overhead benchmarks); a benchmark that wants to measure
+    // per-byte I/O sets it to `kLargeFieldBytes`.
+    std::size_t objFieldBytes = 4;
+
     std::expected<std::uint32_t, HostFunctionError>
     getLedgerSqn() const override
     {
@@ -73,7 +89,7 @@ struct FakeHost : HostFunctions
     std::expected<Bytes, HostFunctionError>
     getCurrentLedgerObjField(SField const&) const override
     {
-        return Bytes{0xAA, 0xBB, 0xCC, 0xDD};
+        return Bytes(objFieldBytes, std::uint8_t{0xAB});
     }
 
     std::expected<Hash, HostFunctionError>
@@ -175,6 +191,24 @@ homeLeFieldWat(std::uint64_t k)
         k);
 }
 
+// Largest-OUTPUT variant of the field getter: a `kLargeFieldBytes` (1 KiB)
+// out buffer at offset 0, paired with a FakeHost configured to return that
+// full payload (see registerCpp/RustLargePayloadBenchmark). This is the
+// direct-write path -- the host writes 1 KiB straight into guest linear
+// memory per call -- so comparing it against `homeLeFieldWat` (4 B) isolates
+// the per-byte host->guest write cost, and Rust-vs-C++ parity is the "no cxx
+// write overhead" result.
+std::string
+homeLeFieldLargeWat(std::uint64_t k)
+{
+    return makeLoopWat(
+        R"((import "host" "home_le_field" (func $f (param i32 i32 i32) (result i32))))",
+        "",
+        "(call $f (i32.const " + std::to_string(xrpl::sfFlags.getCode()) +
+            ") (i32.const 0) (i32.const 1024))",
+        k);
+}
+
 std::string
 sha512HalfWat(std::uint64_t k)
 {
@@ -182,6 +216,24 @@ sha512HalfWat(std::uint64_t k)
         R"((import "host" "sha512_half" (func $f (param i32 i32 i32 i32) (result i32))))",
         R"((data (i32.const 0) "abc"))",
         "(call $f (i32.const 0) (i32.const 3) (i32.const 8) (i32.const 32))",
+        k);
+}
+
+// Largest-INPUT variant of the hash function: hashes a `kLargeFieldBytes`
+// (1 KiB) input region (zero-filled linear memory -- content is irrelevant,
+// FakeHost returns a constant digest) and writes the 32-byte result. This is
+// the read path -- the engine reads 1 KiB out of guest memory and hands it to
+// the host as a `&[u8]` / `rust::Slice` (a pointer+len, no copy across cxx) --
+// so comparing it against `sha512HalfWat` (3 B input) isolates the per-byte
+// guest->host read cost, and Rust-vs-C++ parity is the "no cxx read overhead"
+// result. Input at offset 0, output at 2048 so the two regions don't overlap.
+std::string
+sha512HalfLargeWat(std::uint64_t k)
+{
+    return makeLoopWat(
+        R"((import "host" "sha512_half" (func $f (param i32 i32 i32 i32) (result i32))))",
+        "",
+        "(call $f (i32.const 0) (i32.const 1024) (i32.const 2048) (i32.const 32))",
         k);
 }
 
@@ -307,6 +359,46 @@ registerRustHostFnBenchmark(char const* name, WatGen watGen)
     b->RangeMultiplier(8)->Range(1, 8192)->Complexity(benchmark::oN);
 }
 
+// Large-payload registrars, used for the 1 KiB-per-call benchmarks. Two
+// differences from the small-payload versions above:
+//   (1) FakeHost is told to return the full `kLargeFieldBytes` payload
+//       (harmless for the input-path benchmark, which never calls the field
+//       getter -- the member just goes unread);
+//   (2) K is capped so cumulative host<->guest traffic stays under the 1 MiB
+//       per-run transfer budget both engines enforce. Worst case is
+//       ~1056 B/call (1 KiB in + 32 B out for sha512_half), so
+//       `Range(1, 512)` tops out at ~528 KiB/run -- comfortably under 1 MiB.
+// Compare these against their small-payload namesakes to read off the per-byte
+// I/O cost; that the Rust (cxx) and C++ deltas track each other is the "no cxx
+// I/O overhead" result.
+void
+registerCppLargePayloadBenchmark(char const* name, WatGen watGen)
+{
+    auto* b = benchmark::RegisterBenchmark(name, [watGen](benchmark::State& state) {
+        auto const k = static_cast<std::uint64_t>(state.range(0));
+        auto const code = assemble(watGen(k));
+        FakeHost host;
+        host.objFieldBytes = kLargeFieldBytes;
+        runCppBenchmark(state, code, host);
+        state.SetComplexityN(static_cast<std::int64_t>(k));
+    });
+    b->RangeMultiplier(8)->Range(1, 512)->Complexity(benchmark::oN);
+}
+
+void
+registerRustLargePayloadBenchmark(char const* name, WatGen watGen)
+{
+    auto* b = benchmark::RegisterBenchmark(name, [watGen](benchmark::State& state) {
+        auto const k = static_cast<std::uint64_t>(state.range(0));
+        auto const code = assemble(watGen(k));
+        FakeHost host;
+        host.objFieldBytes = kLargeFieldBytes;
+        runRustBenchmark(state, code, host);
+        state.SetComplexityN(static_cast<std::int64_t>(k));
+    });
+    b->RangeMultiplier(8)->Range(1, 512)->Complexity(benchmark::oN);
+}
+
 // Registration happens via this namespace-scope initializer (rather than the
 // `BENCHMARK(...)` self-registering macro) so the per-host-function
 // benchmarks can be generated in a loop-like fashion and chain
@@ -326,6 +418,17 @@ registerRustHostFnBenchmark(char const* name, WatGen watGen)
 
     registerCppHostFnBenchmark("cpp/sha512_half", sha512HalfWat);
     registerRustHostFnBenchmark("rust/sha512_half", sha512HalfWat);
+
+    // Largest-payload benchmarks (1 KiB/call, the ABI's per-field cap): the
+    // field getter's OUTPUT (direct-write) path and the hash function's INPUT
+    // (read) path -- the two largest single payloads any host function can
+    // move. Compare against their small-payload namesakes to isolate per-byte
+    // cxx I/O overhead.
+    registerCppLargePayloadBenchmark("cpp/home_le_field_1k", homeLeFieldLargeWat);
+    registerRustLargePayloadBenchmark("rust/home_le_field_1k", homeLeFieldLargeWat);
+
+    registerCppLargePayloadBenchmark("cpp/sha512_half_1k", sha512HalfLargeWat);
+    registerRustLargePayloadBenchmark("rust/sha512_half_1k", sha512HalfLargeWat);
 
     registerCppHostFnBenchmark("cpp/trace", traceWat);
     registerRustHostFnBenchmark("rust/trace", traceWat);
