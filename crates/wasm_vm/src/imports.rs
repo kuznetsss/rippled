@@ -1,6 +1,6 @@
-use crate::abi::{AbiArg, AbiRet, charged, to_wasm_i32, write_into};
+use crate::abi::{AbiArg, AbiRet, charged, read_borrowed, to_wasm_i32, write_into};
 use crate::vm::VmState;
-use host_functions::HostFn;
+use host_functions::{HostError, HostFn};
 use wasmi::{Caller, Linker};
 
 /// Import module namespace the guest imports host functions from
@@ -90,9 +90,14 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
                  as_hex: i32|
                  -> i32 {
                     to_wasm_i32(charged(&mut caller, HostFn::Trace, |c| {
-                        let msg = <String as AbiArg>::read(c, (msg_ptr, msg_len))?;
-                        let data = <Vec<u8> as AbiArg>::read(c, (data_ptr, data_len))?;
-                        c.data().host.trace(&msg, &data, as_hex != 0)?;
+                        // Read `msg`/`data` straight out of guest memory — the
+                        // slices alias linear memory, no owned copy (`trace`
+                        // returns nothing, so there's no output-aliasing worry).
+                        let host = c.data().host;
+                        let msg = read_borrowed(c, msg_ptr, msg_len)?;
+                        let data = read_borrowed(c, data_ptr, data_len)?;
+                        let msg = core::str::from_utf8(msg).map_err(|_| HostError::Decoding)?;
+                        host.trace(msg, data, as_hex != 0)?;
                         <() as AbiRet>::write((), c, ())
                     }))
                 },
@@ -106,9 +111,12 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
                  number: i64|
                  -> i32 {
                     to_wasm_i32(charged(&mut caller, HostFn::TraceNum, |c| {
-                        let msg = <String as AbiArg>::read(c, (msg_ptr, msg_len))?;
-                        let __ret = c.data().host.trace_num(&msg, number)?;
-                        <() as AbiRet>::write(__ret, c, ())
+                        // `msg` aliases guest memory — no owned copy.
+                        let host = c.data().host;
+                        let msg = read_borrowed(c, msg_ptr, msg_len)?;
+                        let msg = core::str::from_utf8(msg).map_err(|_| HostError::Decoding)?;
+                        host.trace_num(msg, number)?;
+                        <() as AbiRet>::write((), c, ())
                     }))
                 },
             ),

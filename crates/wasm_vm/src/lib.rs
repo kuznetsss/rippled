@@ -39,7 +39,7 @@ mod tests {
     /// the host `Box` is dropped inside `run_escrow`.
     #[derive(Default)]
     struct Recording {
-        traces: RefCell<Vec<String>>,
+        traces: RefCell<Vec<(String, Vec<u8>)>>,
         nums: RefCell<Vec<(String, i64)>>,
     }
 
@@ -95,8 +95,11 @@ mod tests {
             Ok(digest.len())
         }
 
-        fn trace(&self, msg: &str, _data: &[u8], _as_hex: bool) -> HostResult<()> {
-            self.rec.traces.borrow_mut().push(msg.to_string());
+        fn trace(&self, msg: &str, data: &[u8], _as_hex: bool) -> HostResult<()> {
+            self.rec
+                .traces
+                .borrow_mut()
+                .push((msg.to_string(), data.to_vec()));
             Ok(())
         }
 
@@ -154,6 +157,37 @@ mod tests {
 
         // Gas was metered.
         assert!(outcome.fuel_used > 0, "fuel should have been consumed");
+    }
+
+    /// `trace` reads *two* slices (`msg` + `data`) directly out of guest
+    /// memory (the zero-copy read path). Drive it with a real message and a
+    /// binary payload and check both arrive intact at the host.
+    #[test]
+    fn trace_reads_msg_and_data_from_guest_memory() {
+        let wat = r#"
+            (module
+              (import "host" "trace" (func $trace (param i32 i32 i32 i32 i32) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0)  "hello")
+              (data (i32.const 16) "\01\02\03")
+              (func (export "finish") (result i32)
+                (drop (call $trace (i32.const 0) (i32.const 5) (i32.const 16) (i32.const 3) (i32.const 0)))
+                (i32.const 7)))
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+
+        let rec = Rc::new(Recording::default());
+        let host = MockHost {
+            ledger_sqn: 1,
+            rec: rec.clone(),
+        };
+        let out = run_escrow(&wasm, 1_000_000, &host, "finish").expect("run ok");
+
+        assert_eq!(out.result, 7);
+        assert_eq!(
+            rec.traces.borrow().as_slice(),
+            &[("hello".to_string(), vec![1u8, 2, 3])]
+        );
     }
 
     #[test]

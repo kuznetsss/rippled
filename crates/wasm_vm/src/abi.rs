@@ -44,14 +44,6 @@ impl AbiArg for Vec<u8> {
     }
 }
 
-impl AbiArg for String {
-    type Raw = (i32, i32);
-    fn read(c: &Caller<'_, VmState<'_>>, (ptr, len): (i32, i32)) -> HostResult<Self> {
-        let mem = memory(c)?;
-        read_str(c, &mem, ptr, len)
-    }
-}
-
 /// Encode a *scalar or unit* host-function result into the status the wasm fn
 /// returns (>= 0 success — a value; < 0 a HostError code, via `to_wasm_*`).
 /// `Out` is the extra wasm scalars for output — always `()` here, since these
@@ -178,15 +170,36 @@ fn read_bytes(
     Ok(buf)
 }
 
-/// Copy a UTF-8 string out of guest memory at `ptr`.
-fn read_str(
-    caller: &Caller<'_, VmState<'_>>,
-    mem: &Memory,
+/// Bounds-check `[ptr, ptr + len)` and return a `&[u8]` **aliasing guest linear
+/// memory** — no allocation, no copy. The read analog of [`write_into`]: where
+/// `write_into` hands the host a `&mut [u8]` into guest memory, this hands it a
+/// `&[u8]`, so a *read-only* host call touches the guest's bytes in place.
+///
+/// The returned slice borrows `caller`, so it is valid only for the duration of
+/// the host call it feeds — the same leaf-call invariant `write_into` relies on
+/// (our host functions don't re-enter the guest and move its memory).
+///
+/// Checks match [`read_bytes`]: params validity, the [`MAX_WASM_DATA_LEN`] size
+/// cap (`DataFieldTooLarge`), then the transfer-limit budget — all before the
+/// slice is formed.
+pub(crate) fn read_borrowed<'a>(
+    caller: &'a Caller<'_, VmState<'_>>,
     ptr: i32,
     len: i32,
-) -> Result<String, HostError> {
-    let bytes = read_bytes(caller, mem, ptr, len)?;
-    String::from_utf8(bytes).map_err(|_| HostError::Decoding)
+) -> HostResult<&'a [u8]> {
+    if ptr < 0 || len < 0 {
+        return Err(HostError::InvalidParams);
+    }
+    let (ptr, len) = (ptr as usize, len as usize);
+    if len > MAX_WASM_DATA_LEN {
+        return Err(HostError::DataFieldTooLarge);
+    }
+    charge_transfer(caller.data(), len)?;
+    let end = ptr.checked_add(len).ok_or(HostError::PointerOutOfBounds)?;
+    memory(caller)?
+        .data(caller)
+        .get(ptr..end)
+        .ok_or(HostError::PointerOutOfBounds)
 }
 
 /// Service a "fill-the-caller's-buffer" host call: bounds-check the guest
