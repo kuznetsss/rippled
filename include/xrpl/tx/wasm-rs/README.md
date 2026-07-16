@@ -78,7 +78,7 @@ flowchart TD
 
     subgraph CXX["cxx bridge — ffi.rs (#cxx::bridge)"]
         b1["run_escrow_mocked<br/>run_escrow_with_cxx_host<br/>compile_wat"]:::bridge
-        b2["opaque HostContext + shared structs<br/>RunResult · Hash · HashResult · BytesResult"]:::bridge
+        b2["opaque HostContext + shared struct<br/>RunResult"]:::bridge
     end
 
     subgraph VM["wasm_vm crate — the engine (a driver)"]
@@ -185,11 +185,14 @@ target**, so the guest can't silently fall behind. Engine-side registration is
 - **`imports.rs`** — `register_host_functions`: a `for op in HostFn::ALL { match op { … } }`
   exhaustive match with one `func_wrap` arm per variant. A new `HostFn` won't
   compile until it has an arm here — the "can't forget to register" guarantee.
-- **`ffi.rs`** — the `#[cxx::bridge]`: shared plain-data structs (`RunResult`,
-  `Hash`, `HashResult`, `BytesResult`), the C++→Rust entries
-  (`run_escrow_mocked`, `run_escrow_with_cxx_host`, `compile_wat`), and the
-  Rust→C++ side: the opaque `HostContext` + the `CxxHost<'a>` wrapper that
-  implements `HostFunctions` by forwarding to it.
+- **`ffi.rs`** — the `#[cxx::bridge]`: the shared plain-data struct `RunResult`,
+  the C++→Rust entries (`run_escrow_mocked`, `run_escrow_with_cxx_host`,
+  `compile_wat`), and the Rust→C++ side: the opaque `HostContext` + the
+  `CxxHost<'a>` wrapper that implements `HostFunctions` by forwarding to it.
+  Value-producing host calls carry no owned result struct across cxx: the
+  engine hands C++ a `&mut [u8]` aliasing the guest output region and C++ writes
+  its bytes straight into it, returning the byte count (see the wire convention
+  below).
 
 #### `stdlib/` — guest side, now just a re-export
 
@@ -261,15 +264,16 @@ sequenceDiagram
     B->>E: run_escrow(wasm, gas, CxxHost, "finish")
     E->>G: call finish()
     G-->>E: host import sha512_half(ptr, len, out, cap)
-    E->>E: charge base gas + transfer budget, read guest memory
-    E->>H: host.sha512_half(data)
-    H->>C: ctx.sha512_half(slice)
+    E->>E: charge base gas; read input from guest memory
+    E->>H: host.sha512_half(data, out)  [out aliases guest memory]
+    H->>C: ctx.sha512_half(data, out)
     Note over H,C: Rust to C++ (per call)
     C->>P: hf.computeSha512HalfHash(Slice)
     P-->>C: expected Hash
-    C-->>H: HashResult (status, value)
-    H-->>E: HostResult, 32-byte digest
-    E->>E: write digest into guest memory
+    C->>C: memcpy digest straight into out (guest memory)
+    C-->>H: i32 byte count (or negative error)
+    H-->>E: HostResult<usize> (bytes written)
+    E->>E: enforce cap / buffer-fit / transfer budget from length
     E-->>G: i32 status (byte count, or negative error)
     G-->>E: finish() returns i32
     E-->>B: RunOutcome (result, fuel_used)
@@ -279,8 +283,11 @@ sequenceDiagram
 **Wire convention.** An `i64`/`i32` `>= 0` is a value or byte length; `< 0` is a
 `HostError` code (both sides map through `HostError::from_code` / C++
 `hfErrorToInt`, so the *same* negative number means the *same* error to guest,
-Rust host, and C++). Variable-length bytes travel in `BytesResult{status, data}`;
-fixed-size values use typed newtype structs (`Hash{[u8; 32]}`).
+Rust host, and C++). Every value-producing call — variable- or fixed-length
+alike — writes its bytes straight into the guest output buffer: the host
+receives a `&mut [u8]` aliasing guest linear memory and returns the byte count
+(`>= 0`) it wrote, so there is no owned buffer or result struct to marshal
+across cxx.
 
 ---
 
@@ -300,12 +307,21 @@ mirror image for the guest. This is the table both encode:
 |---|---|
 | `()` | returns `i32` status; `< 0` = error |
 | `u32` | returns `i64`; `< 0` = error |
-| `Vec<u8>` | `(out_ptr, out_len)` + `i32` byte count written |
-| `[u8; N]` | `(out_ptr, out_len)` + `i32` byte count written |
+| `Vec<u8>` | caller passes `(out_ptr, out_len)`; the import writes into it and returns the `i32` byte count |
+| `[u8; N]` | caller passes `(out_ptr, out_len)`; the import writes into it and returns the `i32` byte count |
 
-A signature outside this set is a compile error, on every target. On the guest
-side a `Vec<u8>` return pre-allocates `DEFAULT_BUF_CAP` (512 bytes) for the host
-to fill; if the host has more, the call fails with `BufferTooSmall`.
+A signature outside this set is a compile error, on every target.
+
+Every value-producing return (`Vec<u8>` and `[u8; N]` alike) uses the
+*fill-the-caller's-buffer* shape rather than an owned return. Its **trait**
+method becomes `fn(&self, .., out: &mut [u8]) -> HostResult<usize>` (bytes
+written), and the engine hands that `out` slice straight through to guest linear
+memory (`abi.rs`'s `write_into`), so the host — including the `CxxHost`
+forwarding to C++ — writes once, directly into wasm memory, with no owned
+intermediate. The engine keeps the field-size cap, buffer-fit (`BufferTooSmall`)
+and transfer-budget policy by having the host report the value's *true* length.
+A fixed-size `[u8; N]` is treated identically to a dynamic `Vec<u8>`; the
+declared size is documentation.
 
 ---
 
@@ -318,7 +334,7 @@ the Rust cite the exact C++ line):
 |---|---|---|---|
 | Linear-memory page cap | 128 pages (8 MiB) | `vm.rs` `MAX_MEMORY_PAGES`, via `wasmi::StoreLimits` + `Store::limiter` | `WasmVM.h` `maxPages` |
 | Per-run transfer limit | 1 MiB | `vm.rs` `TRANSFER_LIMIT_BYTES`, `VmState::transfer_budget` (charged in `abi.rs`) | `Protocol.h` `kWasmTransferLimit` |
-| Per-field size cap | 1 KiB | `abi.rs` `MAX_WASM_DATA_LEN`, checked in `read_bytes`/`write_bytes` before any alloc | `Protocol.h` `kMaxWasmDataLength` |
+| Per-field size cap | 1 KiB | `abi.rs` `MAX_WASM_DATA_LEN`, checked in `read_bytes` (before any alloc) and in `write_into` (from the host's reported length) | `Protocol.h` `kMaxWasmDataLength` |
 
 **Gas** is wasmi fuel. Each host call is charged its `#[gas = N]` base cost
 exactly once, through the single `charged()` helper in `abi.rs` — so gas can't be
@@ -454,8 +470,11 @@ cmake --build build --target xrpl_tests
   `// TODO` in `imports.rs`) — a deliberate choice to keep all wasmi-facing code
   in `wasm_vm`.
 - Possible optimisations noted in the code: typed newtypes for keylets /
-  `AccountID`; a `Box<dyn AsRef<[u8]>>` return to drop one copy in
-  `get_current_ledger_obj_field`.
+  `AccountID`. (The extra copy on the value-producing paths — a host-side
+  `Vec<u8>` / `[u8; N]` / cxx result struct, then a copy into guest memory — is
+  **gone**: every value-producing return now lowers to a fill-the-caller's-buffer
+  shape, so the host (Rust or C++) writes straight into guest linear memory in a
+  single copy. See "The ABI lowering".)
 
 ---
 

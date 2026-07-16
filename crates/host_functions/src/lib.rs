@@ -24,8 +24,6 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-
 use host_functions_macros::host_abi;
 
 /// Error codes a host function may return.
@@ -122,20 +120,30 @@ pub struct HostFnSpec {
 // engine's import registration and gas accounting) and the `HostFunctions`
 // trait.
 //
-// The trait is written in terms of ordinary Rust types (`&[u8]`, `Vec<u8>`,
-// `&str`, `u32`). It says nothing about wasm linear memory or pointers — that
-// marshaling lives in the engine on the host side and in `stdlib` on the guest
-// side. The trait stays object-safe so the engine can hold a
-// `Box<dyn HostFunctions>` in its `Store`.
+// The entries are written in terms of ordinary Rust types (`&[u8]`, `Vec<u8>`,
+// `&str`, `u32`, `[u8; N]`). They say nothing about wasm linear memory or
+// pointers — that marshaling lives in the engine on the host side and in
+// `stdlib` on the guest side. The trait stays object-safe so the engine can
+// hold a `Box<dyn HostFunctions>` in its `Store`.
+//
+// Note the one lowering the macro applies rather than mirroring the declared
+// type verbatim: a *value-producing* return (`Vec<u8>` or `[u8; N]`) becomes a
+// fill-the-caller's-buffer method — `fn(&self, .., out: &mut [u8]) ->
+// HostResult<usize>` (bytes written). The host writes straight into `out`, so
+// the engine can hand it a slice aliasing guest linear memory and every such
+// host function writes directly into wasm memory with no owned intermediate to
+// copy through. The declared `Vec<u8>` / `[u8; N]` documents whether the value
+// is variable- or fixed-length; the engine enforces the buffer-fit / field-cap
+// / transfer policy from the returned length either way.
 //
 // The PoC exposes five functions, each chosen to exercise a distinct ABI
 // shape:
-// * `get_ledger_sqn` — fixed-size buffer out (4-byte little-endian serialized
-//   sequence number), ledger read (needs host context);
-// * `get_current_ledger_obj_field` — read a scalar in, return a
-//   variable-length byte buffer;
-// * `sha512_half` — read a byte slice, return a fixed-size buffer (a pure
-//   function, later forwarded to C++);
+// * `get_ledger_sqn` — fill a caller buffer with a fixed 4-byte little-endian
+//   serialized sequence number, ledger read (needs host context);
+// * `get_current_ledger_obj_field` — read a scalar in, fill a caller buffer
+//   with a variable-length value;
+// * `sha512_half` — read a byte slice, fill a caller buffer with a fixed-size
+//   digest (a pure function, later forwarded to C++);
 // * `trace` / `trace_num` — read a byte slice in, return nothing (debug).
 host_abi! {
     /// Sequence number of the current ledger, as its 4 little-endian bytes.
@@ -173,16 +181,16 @@ mod tests {
     struct Dummy;
 
     impl HostFunctions for Dummy {
-        fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
-            Ok([0; 4])
+        fn get_ledger_sqn(&self, _out: &mut [u8]) -> HostResult<usize> {
+            Ok(0)
         }
 
-        fn get_current_ledger_obj_field(&self, _field: i32) -> HostResult<Vec<u8>> {
-            Ok(Vec::new())
+        fn get_current_ledger_obj_field(&self, _field: i32, _out: &mut [u8]) -> HostResult<usize> {
+            Ok(0)
         }
 
-        fn sha512_half(&self, _data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
-            Ok([0u8; HASH_LEN])
+        fn sha512_half(&self, _data: &[u8], _out: &mut [u8]) -> HostResult<usize> {
+            Ok(0)
         }
 
         fn trace(&self, _msg: &str, _data: &[u8], _as_hex: bool) -> HostResult<()> {

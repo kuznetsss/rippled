@@ -4,14 +4,6 @@
 
 #include <cstdint>
 
-// Shared structs live in the generated header; forward-declare so this header
-// (which the generated header includes) doesn't depend on their definitions.
-namespace rs::wasm_vm {
-struct Hash;
-struct HashResult;
-struct BytesResult;
-}  // namespace rs::wasm_vm
-
 // Forward-declared rather than including <xrpl/tx/wasm/HostFunc.h>: this
 // header is `include!()`'d by the cxxbridge-generated translation unit, which
 // builds under the `rs_wasm_vm_cxxbridge` CMake target — it gets only the
@@ -34,14 +26,19 @@ struct HostContext
 {
     xrpl::HostFunctions& hf;
 
-    rs::wasm_vm::HashResult
-    sha512_half(rust::Slice<std::uint8_t const> data) const;
+    // The value-producing calls take `out`, a mutable slice aliasing the
+    // guest's output region in wasm linear memory: they write the value's
+    // bytes straight into it (the single copy) and return the value's true
+    // length (>= 0), or a negative `HostError` code. The engine owns the
+    // buffer-fit / field-cap / transfer policy, deriving it from that length.
+    std::int32_t
+    sha512_half(rust::Slice<std::uint8_t const> data, rust::Slice<std::uint8_t> out) const;
 
-    std::int64_t
-    get_ledger_sqn() const;
+    std::int32_t
+    get_ledger_sqn(rust::Slice<std::uint8_t> out) const;
 
-    rs::wasm_vm::BytesResult
-    get_current_ledger_obj_field(std::int32_t field) const;
+    std::int32_t
+    get_current_ledger_obj_field(std::int32_t field, rust::Slice<std::uint8_t> out) const;
 
     std::int32_t
     trace(rust::Str msg, rust::Slice<std::uint8_t const> data, bool as_hex) const;

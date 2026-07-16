@@ -1,6 +1,6 @@
-use crate::abi::{AbiArg, AbiRet, charged, to_wasm_i32};
+use crate::abi::{AbiArg, AbiRet, charged, to_wasm_i32, write_into};
 use crate::vm::VmState;
-use host_functions::{HASH_LEN, HostFn};
+use host_functions::HostFn;
 use wasmi::{Caller, Linker};
 
 /// Import module namespace the guest imports host functions from
@@ -32,8 +32,10 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
                 op.spec().name,
                 |mut caller: Caller<'_, VmState<'_>>, out_ptr: i32, out_len: i32| -> i32 {
                     to_wasm_i32(charged(&mut caller, HostFn::GetLedgerSqn, |c| {
-                        let __ret = c.data().host.get_ledger_sqn()?;
-                        <[u8; 4] as AbiRet>::write(__ret, c, (out_ptr, out_len))
+                        // The host writes the serialized sequence number
+                        // straight into the guest output region; `write_into`
+                        // owns the bounds/cap/buffer/transfer policy.
+                        write_into(c, out_ptr, out_len, |host, out| host.get_ledger_sqn(out))
                     }))
                 },
             ),
@@ -49,8 +51,12 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
                         &mut caller,
                         HostFn::GetCurrentLedgerObjField,
                         |c| {
-                            let __ret = c.data().host.get_current_ledger_obj_field(field)?;
-                            <Vec<u8> as AbiRet>::write(__ret, c, (out_ptr, out_len))
+                            // The host writes the field's bytes straight into
+                            // the guest output region (no owned `Vec` in
+                            // between); `write_into` owns the policy.
+                            write_into(c, out_ptr, out_len, |host, out| {
+                                host.get_current_ledger_obj_field(field, out)
+                            })
                         },
                     ))
                 },
@@ -65,9 +71,11 @@ pub(crate) fn register_host_functions(linker: &mut Linker<VmState<'_>>) -> Resul
                  out_len: i32|
                  -> i32 {
                     to_wasm_i32(charged(&mut caller, HostFn::Sha512Half, |c| {
+                        // Read the input up front (owned copy), then let the
+                        // host write the 32-byte digest straight into the guest
+                        // output region.
                         let data = <Vec<u8> as AbiArg>::read(c, (data_ptr, data_len))?;
-                        let __ret = c.data().host.sha512_half(&data)?;
-                        <[u8; HASH_LEN] as AbiRet>::write(__ret, c, (out_ptr, out_len))
+                        write_into(c, out_ptr, out_len, |host, out| host.sha512_half(&data, out))
                     }))
                 },
             ),

@@ -20,7 +20,7 @@ pub const MAX_MEMORY_PAGES: u32 = 128;
 pub const MAX_MEMORY_BYTES: usize = (MAX_MEMORY_PAGES * WASM_PAGE_BYTES) as usize;
 
 /// Per-run transfer-limit budget: total bytes that may cross the host/guest
-/// boundary (via the `read_bytes`/`write_bytes` helpers in `abi.rs`) during
+/// boundary (via the `read_bytes` / `write_into` helpers in `abi.rs`) during
 /// one [`run_escrow`] invocation. A budget separate from gas.
 ///
 /// Mirrors `kWasmTransferLimit = 1 << 20` in
@@ -38,10 +38,10 @@ pub struct VmState<'h> {
     pub(crate) mem_limits: StoreLimits,
     /// Remaining transfer-limit budget for this run (see
     /// [`TRANSFER_LIMIT_BYTES`]); decremented in `abi.rs`'s `read_bytes` /
-    /// `write_bytes` by the number of bytes actually moved.
+    /// `write_into` by the number of bytes actually moved.
     ///
     /// A `Cell`, not a plain `u64`: `AbiArg::read` (the guest -> host read
-    /// path) only has a shared `&Caller`, while `AbiRet::write` (the host ->
+    /// path) only has a shared `&Caller`, while `write_into` (the host ->
     /// guest write path) has `&mut Caller` — both need to decrement this
     /// counter, so it can't be an ordinary field mutated only through
     /// `&mut`. The store (and this counter) is only ever touched from one

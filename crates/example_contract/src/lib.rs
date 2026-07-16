@@ -44,8 +44,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn finish() -> i32 {
     let host = GuestHost;
-    let sqn = match host.get_ledger_sqn() {
-        Ok(s) => u32::from_le_bytes(s),
+    // The host fills our buffer with the 4-byte little-endian sequence number.
+    let mut sqn_bytes = [0u8; 4];
+    let sqn = match host.get_ledger_sqn(&mut sqn_bytes) {
+        Ok(_) => u32::from_le_bytes(sqn_bytes),
         Err(e) => return e.code(),
     };
     let _ = host.trace_num("ledger_sqn", sqn as i64);

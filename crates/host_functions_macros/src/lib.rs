@@ -40,11 +40,21 @@
 //! |----------------|----------------------------------------|
 //! | `()`           | returns `i32` status; `< 0` = error    |
 //! | `u32`          | returns `i64`; `< 0` = error           |
-//! | `Vec<u8>`      | `(out_ptr, out_len)` + `i32` byte count|
-//! | `[u8; N]`      | `(out_ptr, out_len)` + `i32` byte count|
+//! | `Vec<u8>`      | caller passes its own `(out_ptr, out_len)`; the import writes into it and returns the `i32` byte count |
+//! | `[u8; N]`      | caller passes its own `(out_ptr, out_len)`; the import writes into it and returns the `i32` byte count |
 //!
 //! A signature using a type outside this table is a compile error (on every
 //! target, not just wasm32), so the guest side cannot silently fall behind.
+//!
+//! Note the shape shared by every value-producing return (`Vec<u8>` and
+//! `[u8; N]` alike): rather than returning an owned buffer, its *trait* method
+//! lowers to `fn(&self, .., out: &mut [u8]) -> HostResult<usize>` (bytes
+//! written). The caller owns the buffer and the host writes straight into it,
+//! so on the engine side the host's bytes go directly into guest linear memory
+//! with no owned buffer to copy through — the whole point of the direct-write
+//! path. A fixed-size `[u8; N]` is treated identically to a dynamic `Vec<u8>`
+//! here; the declared size is documentation, and the engine still enforces the
+//! buffer-fit / field-size / transfer policy from the returned length.
 //!
 //! The macro deliberately emits bare identifiers (`HostResult`, `HostError`,
 //! `HostFnSpec`, `Vec`) rather than fully qualified paths: the call site is a
@@ -208,12 +218,14 @@ enum RetShape {
     Unit,
     /// `u32` — import returns an `i64` (value, or negative error code).
     ScalarU32,
-    /// `Vec<u8>` — import writes into a caller-provided buffer and returns the
-    /// byte count as `i32`.
-    BytesDyn,
-    /// `[u8; N]` — like `BytesDyn` but the buffer is a fixed-size stack array;
-    /// carries the length expression `N`.
-    BytesFixed(proc_macro2::TokenStream),
+    /// `Vec<u8>` or `[u8; N]` — a value-producing return. The host writes
+    /// straight into a caller-provided buffer (a slice aliasing guest linear
+    /// memory) and returns the value's true byte count as `i32` (`< 0` =
+    /// error). Both the dynamic and the fixed-size forms lower to this one
+    /// "fill-the-caller's-buffer" shape, so every value-producing host function
+    /// writes directly into wasm memory with no owned intermediate to copy
+    /// through.
+    Bytes,
 }
 
 /// Classify a declared return type into its guest lowering, or `None` (with a
@@ -226,11 +238,10 @@ fn classify_return(output: &ReturnType) -> syn::Result<RetShape> {
     if is_ident(ty, "u32") {
         Ok(RetShape::ScalarU32)
     } else if is_vec_u8(ty) {
-        Ok(RetShape::BytesDyn)
+        Ok(RetShape::Bytes)
     } else if let Type::Array(a) = ty {
         if is_u8(&a.elem) {
-            let len = &a.len;
-            Ok(RetShape::BytesFixed(quote! { #len }))
+            Ok(RetShape::Bytes)
         } else {
             Err(syn::Error::new_spanned(
                 ty,
@@ -331,12 +342,33 @@ pub fn host_abi(input: TokenStream) -> TokenStream {
         });
         variant_idents.push(variant_ident);
 
-        // Trait method: prepend `&self`, wrap the return type in `HostResult<_>`.
+        // Classify the return shape up front: it drives both the trait method
+        // signature (here) and the guest lowering (below).
+        let ret_shape = match classify_return(&orig_output) {
+            Ok(shape) => shape,
+            Err(e) => {
+                errors.push(e.to_compile_error());
+                continue 'entries;
+            }
+        };
+
+        // Trait method: prepend `&self` and set the return type. A
+        // value-producing return (`Vec<u8>` / `[u8; N]`) lowers to the
+        // fill-the-caller's-buffer shape — an extra `out: &mut [u8]` parameter
+        // and a `HostResult<usize>` (bytes written) return — so the engine can
+        // have the host write straight into guest linear memory instead of
+        // returning an owned buffer the engine must then copy in. Everything
+        // else keeps its declared type, wrapped in `HostResult<_>`.
         let inner_ret: proc_macro2::TokenStream = match &sig.output {
             ReturnType::Default => quote! { () },
             ReturnType::Type(_, ty) => quote! { #ty },
         };
-        sig.output = syn::parse_quote! { -> HostResult<#inner_ret> };
+        if matches!(ret_shape, RetShape::Bytes) {
+            sig.inputs.push(syn::parse_quote! { out: &mut [u8] });
+            sig.output = syn::parse_quote! { -> HostResult<usize> };
+        } else {
+            sig.output = syn::parse_quote! { -> HostResult<#inner_ret> };
+        }
         sig.inputs.insert(0, syn::parse_quote! { &self });
         let method_sig = sig.clone();
 
@@ -374,14 +406,6 @@ pub fn host_abi(input: TokenStream) -> TokenStream {
             }
         }
 
-        let ret_shape = match classify_return(&orig_output) {
-            Ok(shape) => shape,
-            Err(e) => {
-                errors.push(e.to_compile_error());
-                continue 'entries;
-            }
-        };
-
         let import_ident = format_ident!("__hostimport_{}", fn_ident);
         let mut extern_params = arg_params;
         let (ret_scalar, body) = match ret_shape {
@@ -399,31 +423,20 @@ pub fn host_abi(input: TokenStream) -> TokenStream {
                     ret_u32(__status)
                 },
             ),
-            RetShape::BytesDyn => {
+            RetShape::Bytes => {
+                // The caller owns the output buffer (`out`, the trailing
+                // `&mut [u8]` the trait lowering added); pass its base and
+                // length to the import, which writes straight into it and
+                // returns the value's true byte count.
                 extern_params.push(quote! { out_ptr: i32 });
                 extern_params.push(quote! { out_len: i32 });
-                call_args.push(quote! { __buf.as_mut_ptr() as usize as i32 });
-                call_args.push(quote! { __buf.len() as i32 });
+                call_args.push(quote! { out.as_mut_ptr() as usize as i32 });
+                call_args.push(quote! { out.len() as i32 });
                 (
                     quote! { i32 },
                     quote! {
-                        let mut __buf = alloc::vec![0u8; DEFAULT_BUF_CAP];
                         let __status = unsafe { #import_ident(#(#call_args),*) };
-                        ret_bytes(__status, __buf)
-                    },
-                )
-            }
-            RetShape::BytesFixed(len) => {
-                extern_params.push(quote! { out_ptr: i32 });
-                extern_params.push(quote! { out_len: i32 });
-                call_args.push(quote! { __out.as_mut_ptr() as usize as i32 });
-                call_args.push(quote! { (#len) as i32 });
-                (
-                    quote! { i32 },
-                    quote! {
-                        let mut __out = [0u8; #len];
-                        let __status = unsafe { #import_ident(#(#call_args),*) };
-                        ret_fixed(__status, __out)
+                        ret_bytes_len(__status)
                     },
                 )
             }
@@ -473,12 +486,6 @@ pub fn host_abi(input: TokenStream) -> TokenStream {
         #[allow(dead_code)]
         pub mod __guest_impl {
             use super::*;
-            use alloc::vec::Vec;
-
-            /// Capacity a `Vec<u8>`-returning import pre-allocates for the host
-            /// to write into. If the host has more than this, the call fails
-            /// with `HostError::BufferTooSmall` (the negative status path).
-            const DEFAULT_BUF_CAP: usize = 512;
 
             /// Decode a unit-returning import's status: `< 0` is an error code.
             #[inline]
@@ -500,26 +507,15 @@ pub fn host_abi(input: TokenStream) -> TokenStream {
                 }
             }
 
-            /// Decode a `Vec<u8>`-returning import: `status` is the byte count
-            /// the host wrote into `buf`.
+            /// Decode a buffer-filling import (`Vec<u8>` / `[u8; N]` return):
+            /// `status` is the count of bytes the host wrote into the
+            /// caller-provided `out` buffer (`< 0` = error code).
             #[inline]
-            fn ret_bytes(status: i32, mut buf: Vec<u8>) -> HostResult<Vec<u8>> {
+            fn ret_bytes_len(status: i32) -> HostResult<usize> {
                 if status < 0 {
                     Err(HostError::from_code(status))
                 } else {
-                    buf.truncate(status as usize);
-                    Ok(buf)
-                }
-            }
-
-            /// Decode a `[u8; N]`-returning import: on success the host has
-            /// already filled `buf`.
-            #[inline]
-            fn ret_fixed<const N: usize>(status: i32, buf: [u8; N]) -> HostResult<[u8; N]> {
-                if status < 0 {
-                    Err(HostError::from_code(status))
-                } else {
-                    Ok(buf)
+                    Ok(status as usize)
                 }
             }
 

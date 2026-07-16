@@ -5,56 +5,69 @@
 #include <xrpl/tx/wasm/HostFunc.h>    // xrpl::HostFunctions (complete type)
 #include <xrpl/tx/wasm/WasmCommon.h>  // hfErrorToInt
 
-#include <rs_wasm_vm_cxxbridge/ffi.h>  // complete Hash / HashResult / BytesResult
-
-#include <algorithm>
+#include <cstring>
 #include <string_view>
 
 namespace xrpl::wasmrs {
 
-rs::wasm_vm::HashResult
-HostContext::sha512_half(rust::Slice<std::uint8_t const> data) const
+std::int32_t
+HostContext::sha512_half(rust::Slice<std::uint8_t const> data, rust::Slice<std::uint8_t> out) const
 {
     auto const r = hf.computeSha512HalfHash(Slice(data.data(), data.size()));
     if (!r)
-    {
-        return rs::wasm_vm::HashResult{
-            .status = hfErrorToInt(r.error()), .value = rs::wasm_vm::Hash{}};
-    }
-    rs::wasm_vm::Hash out{};
-    std::copy(r->data(), r->data() + r->size(), out.data.begin());
-    return rs::wasm_vm::HashResult{.status = 0, .value = out};
+        return hfErrorToInt(r.error());
+
+    // Single copy: straight from the digest into `out`, the slice the engine
+    // handed us aliasing guest linear memory. Write only when it fits; the
+    // engine enforces the buffer-fit / field-cap / transfer policy from the
+    // true length we return.
+    auto const n = r->size();
+    if (n <= out.size())
+        std::memcpy(out.data(), r->data(), n);
+    return static_cast<std::int32_t>(n);
 }
 
-std::int64_t
-HostContext::get_ledger_sqn() const
+std::int32_t
+HostContext::get_ledger_sqn(rust::Slice<std::uint8_t> out) const
 {
     auto const r = hf.getLedgerSqn();
     if (!r)
-        return static_cast<std::int64_t>(hfErrorToInt(r.error()));
-    return static_cast<std::int64_t>(*r);
+        return hfErrorToInt(r.error());
+
+    // Serialize the sequence number as 4 little-endian bytes (matching the
+    // guest's `u32::from_le_bytes`) straight into `out`.
+    std::uint32_t const v = *r;
+    std::uint8_t const le[4] = {
+        static_cast<std::uint8_t>(v),
+        static_cast<std::uint8_t>(v >> 8),
+        static_cast<std::uint8_t>(v >> 16),
+        static_cast<std::uint8_t>(v >> 24),
+    };
+    if (sizeof(le) <= out.size())
+        std::memcpy(out.data(), le, sizeof(le));
+    return static_cast<std::int32_t>(sizeof(le));
 }
 
-rs::wasm_vm::BytesResult
-HostContext::get_current_ledger_obj_field(std::int32_t field) const
+std::int32_t
+HostContext::get_current_ledger_obj_field(std::int32_t field, rust::Slice<std::uint8_t> out) const
 {
     auto const& m = SField::getKnownCodeToField();
     auto const it = m.find(field);
     if (it == m.end())
-    {
-        return rs::wasm_vm::BytesResult{
-            .status = hfErrorToInt(HostFunctionError::InvalidField), .data = {}};
-    }
+        return hfErrorToInt(HostFunctionError::InvalidField);
 
     auto const r = hf.getCurrentLedgerObjField(*it->second);
     if (!r)
-        return rs::wasm_vm::BytesResult{.status = hfErrorToInt(r.error()), .data = {}};
+        return hfErrorToInt(r.error());
 
-    rs::wasm_vm::BytesResult out{.status = 0, .data = {}};
-    out.data.reserve(r->size());
-    for (auto b : *r)
-        out.data.push_back(b);
-    return out;
+    // Single copy: straight from the primitive's buffer into `out`, the slice
+    // the engine handed us aliasing guest linear memory — no intermediate.
+    // Write only when it fits; the engine enforces the field-size cap,
+    // buffer-fit and transfer budget from the true length we return.
+    auto const n = r->size();
+    if (n <= out.size())
+        std::memcpy(out.data(), r->data(), n);
+    return static_cast<std::int32_t>(n);
 }
 
 std::int32_t

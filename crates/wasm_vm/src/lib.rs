@@ -51,30 +51,48 @@ mod tests {
     }
 
     impl HostFunctions for MockHost {
-        fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
-            Ok(self.ledger_sqn.to_le_bytes())
+        fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize> {
+            let bytes = self.ledger_sqn.to_le_bytes();
+            if bytes.len() <= out.len() {
+                out[..bytes.len()].copy_from_slice(&bytes);
+            }
+            Ok(bytes.len())
         }
 
-        fn get_current_ledger_obj_field(&self, field_code: i32) -> HostResult<Vec<u8>> {
+        fn get_current_ledger_obj_field(
+            &self,
+            field_code: i32,
+            out: &mut [u8],
+        ) -> HostResult<usize> {
             // Canned "escrow object": field 1 -> three bytes; field 3 -> one
             // byte over the 1 KiB field cap (`MAX_WASM_DATA_LEN`), to drive
             // the `DataFieldTooLarge` guardrail; field 4 -> exactly 1 KiB, to
             // drive the transfer-limit / field-cap boundary tests; everything
             // else absent.
-            match field_code {
-                1 => Ok(vec![0xAA, 0xBB, 0xCC]),
-                3 => Ok(vec![0u8; 1025]),
-                4 => Ok(vec![0u8; 1024]),
-                _ => Err(HostError::FieldNotFound),
+            //
+            // Fill-buffer contract: write into `out` only when the value fits,
+            // and always return its *true* length — the engine enforces the
+            // cap / buffer-fit / transfer policy from that length.
+            let data: &[u8] = match field_code {
+                1 => &[0xAA, 0xBB, 0xCC],
+                3 => &[0u8; 1025],
+                4 => &[0u8; 1024],
+                _ => return Err(HostError::FieldNotFound),
+            };
+            if data.len() <= out.len() {
+                out[..data.len()].copy_from_slice(data);
             }
+            Ok(data.len())
         }
 
-        fn sha512_half(&self, data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
+        fn sha512_half(&self, data: &[u8], out: &mut [u8]) -> HostResult<usize> {
             use sha2::{Digest, Sha512};
             let full = Sha512::digest(data);
-            let mut out = [0u8; HASH_LEN];
-            out.copy_from_slice(&full[..HASH_LEN]);
-            Ok(out)
+            let digest = &full[..HASH_LEN];
+            if digest.len() <= out.len() {
+                out[..digest.len()].copy_from_slice(digest);
+            }
+            Ok(digest.len())
         }
 
         fn trace(&self, msg: &str, _data: &[u8], _as_hex: bool) -> HostResult<()> {
@@ -173,15 +191,23 @@ mod tests {
         }
 
         impl HostFunctions for BorrowingHost<'_> {
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
-                Ok(9u32.to_le_bytes())
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize> {
+                let bytes = 9u32.to_le_bytes();
+                if bytes.len() <= out.len() {
+                    out[..bytes.len()].copy_from_slice(&bytes);
+                }
+                Ok(bytes.len())
             }
 
-            fn get_current_ledger_obj_field(&self, _field_code: i32) -> HostResult<Vec<u8>> {
+            fn get_current_ledger_obj_field(
+                &self,
+                _field_code: i32,
+                _out: &mut [u8],
+            ) -> HostResult<usize> {
                 Err(HostError::FieldNotFound)
             }
 
-            fn sha512_half(&self, _data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
+            fn sha512_half(&self, _data: &[u8], _out: &mut [u8]) -> HostResult<usize> {
                 Err(HostError::Internal)
             }
 

@@ -1,5 +1,5 @@
 use crate::vm::VmState;
-use host_functions::{HostError, HostFn, HostResult};
+use host_functions::{HostError, HostFn, HostFunctions, HostResult};
 use wasmi::{Caller, Extern, Memory};
 
 // ---------------------------------------------------------------------------
@@ -52,11 +52,14 @@ impl AbiArg for String {
     }
 }
 
-/// Encode a host-function result: write bytes into the guest output buffer if
-/// the type needs one, and yield the status the wasm fn returns
-/// (>= 0 success — a value or byte count; < 0 a HostError code, via `to_wasm_*`).
-/// `Out` is the extra wasm scalars for output: `()` for scalar/unit returns,
-/// `(i32, i32)` = (out_ptr, out_len) for buffers.
+/// Encode a *scalar or unit* host-function result into the status the wasm fn
+/// returns (>= 0 success — a value; < 0 a HostError code, via `to_wasm_*`).
+/// `Out` is the extra wasm scalars for output — always `()` here, since these
+/// returns need no guest buffer.
+///
+/// Value-producing returns (`Vec<u8>` / `[u8; N]`) do *not* go through this
+/// trait: they are serviced by [`write_into`], where the host writes straight
+/// into guest linear memory with no owned buffer to encode.
 pub(crate) trait AbiRet {
     type Out;
     fn write(self, caller: &mut Caller<'_, VmState<'_>>, out: Self::Out) -> HostResult<i64>;
@@ -72,22 +75,6 @@ impl AbiRet for u32 {
     type Out = ();
     fn write(self, _c: &mut Caller<'_, VmState<'_>>, _o: ()) -> HostResult<i64> {
         Ok(self as i64)
-    }
-}
-
-impl AbiRet for Vec<u8> {
-    type Out = (i32, i32);
-    fn write(self, c: &mut Caller<'_, VmState<'_>>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
-        let mem = memory(c)?;
-        Ok(write_bytes(c, &mem, ptr, cap, &self)? as i64)
-    }
-}
-
-impl<const N: usize> AbiRet for [u8; N] {
-    type Out = (i32, i32);
-    fn write(self, c: &mut Caller<'_, VmState<'_>>, (ptr, cap): (i32, i32)) -> HostResult<i64> {
-        let mem = memory(c)?;
-        Ok(write_bytes(c, &mem, ptr, cap, &self)? as i64)
     }
 }
 
@@ -202,30 +189,56 @@ fn read_str(
     String::from_utf8(bytes).map_err(|_| HostError::Decoding)
 }
 
-/// Write `src` into the guest buffer `[dst, dst + cap)`; returns bytes written.
+/// Service a "fill-the-caller's-buffer" host call: bounds-check the guest
+/// output region `[dst, dst + cap)`, hand the host a `&mut [u8]` aliasing it,
+/// and let the host write **straight into guest linear memory** — the single
+/// copy, with no owned buffer intermediate (this is what removes the extra copy
+/// the value-producing host functions used to pay: a `Vec<u8>` / `[u8; N]`
+/// materialized on the host side, then copied into guest memory. The `CxxHost`
+/// path additionally used to marshal C++ `Bytes` through a `rust::Vec` /
+/// `HashResult`; that too is gone).
 ///
-/// Checks, in order: params validity; the [`MAX_WASM_DATA_LEN`] size cap
-/// (`DataFieldTooLarge`) — so an oversized field is rejected before it ever
-/// touches the transfer budget; `BufferTooSmall` if the guest's buffer can't
-/// hold it; then the transfer-limit budget (`OutOfTransferLimit`).
-fn write_bytes(
+/// `fill` returns the value's *true* length (it writes only when the value fits
+/// in `dst`), so the engine keeps ownership of the policy the guest observes:
+/// the [`MAX_WASM_DATA_LEN`] field-size cap (`DataFieldTooLarge`), the
+/// buffer-fit check (`BufferTooSmall`), and the transfer-limit budget — checked
+/// here, in the same order as the C++ `setData` path (size cap precedes the
+/// transfer charge). On success returns the byte count.
+///
+/// Ordering note: because the byte count isn't known until `fill` runs, the
+/// transfer budget is charged *after* the write rather than before it (the
+/// pre-write gas charge in [`charged`] still bounds how often this runs). A
+/// value rejected for being over-cap/over-budget may leave bytes in the guest
+/// buffer, but they sit within the guest's own bounds and the guest must treat
+/// a negative status as "don't read the buffer".
+pub(crate) fn write_into(
     caller: &mut Caller<'_, VmState<'_>>,
-    mem: &Memory,
     dst: i32,
     cap: i32,
-    src: &[u8],
-) -> Result<i32, HostError> {
+    fill: impl FnOnce(&dyn HostFunctions, &mut [u8]) -> HostResult<usize>,
+) -> HostResult<i64> {
     if dst < 0 || cap < 0 {
         return Err(HostError::InvalidParams);
     }
-    if src.len() > MAX_WASM_DATA_LEN {
+    let (dst, cap) = (dst as usize, cap as usize);
+    let mem = memory(caller)?;
+    // Copy the shared `&dyn HostFunctions` out of the store data (references are
+    // Copy) so the data borrow ends before we borrow guest memory mutably.
+    let host: &dyn HostFunctions = caller.data().host;
+    let end = dst.checked_add(cap).ok_or(HostError::PointerOutOfBounds)?;
+    let out = mem
+        .data_mut(&mut *caller)
+        .get_mut(dst..end)
+        .ok_or(HostError::PointerOutOfBounds)?;
+
+    let n = fill(host, out)?;
+
+    if n > MAX_WASM_DATA_LEN {
         return Err(HostError::DataFieldTooLarge);
     }
-    if src.len() > cap as usize {
+    if n > cap {
         return Err(HostError::BufferTooSmall);
     }
-    charge_transfer(caller.data(), src.len())?;
-    mem.write(&mut *caller, dst as usize, src)
-        .map_err(|_| HostError::PointerOutOfBounds)?;
-    Ok(src.len() as i32)
+    charge_transfer(caller.data(), n)?;
+    Ok(n as i64)
 }

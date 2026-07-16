@@ -15,29 +15,6 @@ mod bridge {
         fuel_used: u64,
     }
 
-    /// A `sha512Half` digest (first 32 bytes of SHA-512), as a typed value
-    /// rather than raw bytes, so the FFI boundary carries meaning.
-    struct Hash {
-        data: [u8; 32],
-    }
-
-    /// A host-fn result carrying a status (>= 0 ok, < 0 = `HostError` code)
-    /// and the value. Mirrors the wire convention the wasm guest ABI already
-    /// uses, so the C++ side can produce exactly the same `HostError` codes
-    /// the Rust engine understands via [`host_functions::HostError::from_code`].
-    struct HashResult {
-        status: i32,
-        value: Hash,
-    }
-
-    /// A variable-length byte result carrying a status (>= 0 ok, < 0 =
-    /// `HostError` code), used by host functions that return a buffer whose
-    /// size isn't known ahead of time (e.g. a serialized ledger-object field).
-    struct BytesResult {
-        status: i32,
-        data: Vec<u8>,
-    }
-
     extern "Rust" {
         // Run `wasm`'s `finish` export with `gas` fuel against a built-in
         // mock host.
@@ -59,14 +36,19 @@ mod bridge {
         #[namespace = "xrpl::wasmrs"]
         type HostContext;
 
+        // Each value-producing host call hands C++ `out`, a mutable slice
+        // aliasing the guest's output region in wasm linear memory; C++ writes
+        // the value's bytes straight into it (the single copy) and returns the
+        // value's true length (>= 0), or a negative `HostError` code. There is
+        // no owned result struct to marshal across cxx.
         #[namespace = "xrpl::wasmrs"]
-        fn sha512_half(self: &HostContext, data: &[u8]) -> HashResult;
+        fn sha512_half(self: &HostContext, data: &[u8], out: &mut [u8]) -> i32;
 
         #[namespace = "xrpl::wasmrs"]
-        fn get_ledger_sqn(self: &HostContext) -> i64;
+        fn get_ledger_sqn(self: &HostContext, out: &mut [u8]) -> i32;
 
         #[namespace = "xrpl::wasmrs"]
-        fn get_current_ledger_obj_field(self: &HostContext, field: i32) -> BytesResult;
+        fn get_current_ledger_obj_field(self: &HostContext, field: i32, out: &mut [u8]) -> i32;
 
         #[namespace = "xrpl::wasmrs"]
         fn trace(self: &HostContext, msg: &str, data: &[u8], as_hex: bool) -> i32;
@@ -77,7 +59,7 @@ mod bridge {
 }
 
 use crate::run_escrow;
-use host_functions::{HASH_LEN, HostError, HostFunctions, HostResult};
+use host_functions::{HostError, HostFunctions, HostResult};
 
 /// Minimal synthetic-ledger host with no external deps (no `sha2`). Used by
 /// `run_escrow_mocked` for engine-only tests; [`CxxHost`] below is the
@@ -85,15 +67,19 @@ use host_functions::{HASH_LEN, HostError, HostFunctions, HostResult};
 struct SampleHost;
 
 impl HostFunctions for SampleHost {
-    fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
-        Ok(7u32.to_le_bytes())
+    fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize> {
+        let bytes = 7u32.to_le_bytes();
+        if bytes.len() <= out.len() {
+            out[..bytes.len()].copy_from_slice(&bytes);
+        }
+        Ok(bytes.len())
     }
 
-    fn get_current_ledger_obj_field(&self, _field: i32) -> HostResult<Vec<u8>> {
+    fn get_current_ledger_obj_field(&self, _field: i32, _out: &mut [u8]) -> HostResult<usize> {
         Err(HostError::FieldNotFound)
     }
 
-    fn sha512_half(&self, _data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
+    fn sha512_half(&self, _data: &[u8], _out: &mut [u8]) -> HostResult<usize> {
         Err(HostError::Internal)
     }
 
@@ -137,30 +123,37 @@ struct CxxHost<'a> {
 }
 
 impl HostFunctions for CxxHost<'_> {
-    fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> {
-        let v = self.ctx.get_ledger_sqn();
-        if v < 0 {
-            Err(HostError::from_code(v as i32))
+    fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize> {
+        // C++ writes the serialized sequence number straight into `out` (guest
+        // linear memory) and returns its true length, or a negative `HostError`
+        // code.
+        let n = self.ctx.get_ledger_sqn(out);
+        if n < 0 {
+            Err(HostError::from_code(n))
         } else {
-            Ok((v as u32).to_le_bytes())
+            Ok(n as usize)
         }
     }
 
-    fn get_current_ledger_obj_field(&self, field: i32) -> HostResult<Vec<u8>> {
-        let r = self.ctx.get_current_ledger_obj_field(field);
-        if r.status < 0 {
-            Err(HostError::from_code(r.status))
+    fn get_current_ledger_obj_field(&self, field: i32, out: &mut [u8]) -> HostResult<usize> {
+        // C++ writes the field's bytes straight into `out` and returns the
+        // field's true length, or a negative `HostError` code.
+        let n = self.ctx.get_current_ledger_obj_field(field, out);
+        if n < 0 {
+            Err(HostError::from_code(n))
         } else {
-            Ok(r.data)
+            Ok(n as usize)
         }
     }
 
-    fn sha512_half(&self, data: &[u8]) -> HostResult<[u8; HASH_LEN]> {
-        let r = self.ctx.sha512_half(data);
-        if r.status < 0 {
-            Err(HostError::from_code(r.status))
+    fn sha512_half(&self, data: &[u8], out: &mut [u8]) -> HostResult<usize> {
+        // C++ writes the digest straight into `out` and returns its true length
+        // (32), or a negative `HostError` code.
+        let n = self.ctx.sha512_half(data, out);
+        if n < 0 {
+            Err(HostError::from_code(n))
         } else {
-            Ok(r.value.data)
+            Ok(n as usize)
         }
     }
 
