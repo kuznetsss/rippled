@@ -293,7 +293,7 @@ runRustBenchmark(benchmark::State& state, std::vector<std::uint8_t> const& code,
 {
     try
     {
-        auto const warm = xrpl::wasmrs::runEscrowWasmRsWithCxxHost(code, host, GAS);
+        auto warm = xrpl::wasmrs::runEscrowWasmRsWithCxxHost(code, host, GAS);
         benchmark::DoNotOptimize(warm);
     }
     catch (std::exception const& e)
@@ -325,12 +325,20 @@ BM_Rust_Launch(benchmark::State& state)
 }
 
 // Registers a C++-engine benchmark swept over K (the per-run host-call loop
-// count): `RangeMultiplier(8)->Range(1, 8192)` yields K in {1, 8, 64, 512,
-// 4096, 8192}. The transfer-limit note in CLAUDE.md's benchmark task caps K
+// count): `Arg(0)` plus `RangeMultiplier(8)->Range(1, 8192)` yields K in
+// {0, 1, 8, 64, 512, 4096, 8192}. K=0 is the *baseline*: the SAME contract with
+// its host-call loop running zero times, so it measures launch + import
+// resolution + memory (everything except the calls). The correct per-call cost
+// is then `(run(K) - run(0)) / K` -- subtracting this baseline rather than the
+// no-import `launch` floor is what removes the contract's real fixed cost, since
+// that floor lacks the imports + memory these contracts pay for (see
+// bench_table.py). The transfer-limit note in CLAUDE.md's benchmark task caps K
 // at 8192: both engines enforce a 1 MiB PER-RUN cumulative host<->guest byte
-// budget, and sha512_half is the most bytes-hungry call here at ~35 B/call,
-// so 8192 * 35 ~= 287 KB stays well under the cap. `SetComplexityN(K)` +
-// `Complexity(oN)` reports a per-call cost alongside the raw per-run time.
+// budget, and sha512_half is the most bytes-hungry call here at ~35 B/call, so
+// 8192 * 35 ~= 287 KB stays well under the cap. `SetComplexityN(K)` +
+// `Complexity(oN)` still emits a BigO coefficient, but GB fits it *through the
+// origin* (time ~= coef*N), so the coefficient absorbs the fixed cost; prefer
+// the K=0-baseline per-call cost above.
 void
 registerCppHostFnBenchmark(char const* name, WatGen watGen)
 {
@@ -341,7 +349,7 @@ registerCppHostFnBenchmark(char const* name, WatGen watGen)
         runCppBenchmark(state, code, host);
         state.SetComplexityN(static_cast<std::int64_t>(k));
     });
-    b->RangeMultiplier(8)->Range(1, 8192)->Complexity(benchmark::oN);
+    b->Arg(0)->RangeMultiplier(8)->Range(1, 8192)->Complexity(benchmark::oN);
 }
 
 // Rust-engine counterpart of `registerCppHostFnBenchmark`; see its comment
@@ -356,7 +364,7 @@ registerRustHostFnBenchmark(char const* name, WatGen watGen)
         runRustBenchmark(state, code, host);
         state.SetComplexityN(static_cast<std::int64_t>(k));
     });
-    b->RangeMultiplier(8)->Range(1, 8192)->Complexity(benchmark::oN);
+    b->Arg(0)->RangeMultiplier(8)->Range(1, 8192)->Complexity(benchmark::oN);
 }
 
 // Large-payload registrars, used for the 1 KiB-per-call benchmarks. Two
@@ -382,7 +390,7 @@ registerCppLargePayloadBenchmark(char const* name, WatGen watGen)
         runCppBenchmark(state, code, host);
         state.SetComplexityN(static_cast<std::int64_t>(k));
     });
-    b->RangeMultiplier(8)->Range(1, 512)->Complexity(benchmark::oN);
+    b->Arg(0)->RangeMultiplier(8)->Range(1, 512)->Complexity(benchmark::oN);
 }
 
 void
@@ -396,7 +404,7 @@ registerRustLargePayloadBenchmark(char const* name, WatGen watGen)
         runRustBenchmark(state, code, host);
         state.SetComplexityN(static_cast<std::int64_t>(k));
     });
-    b->RangeMultiplier(8)->Range(1, 512)->Complexity(benchmark::oN);
+    b->Arg(0)->RangeMultiplier(8)->Range(1, 512)->Complexity(benchmark::oN);
 }
 
 // Registration happens via this namespace-scope initializer (rather than the
