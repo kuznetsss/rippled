@@ -472,4 +472,115 @@ mod tests {
         let out = run_escrow(&wasm, 5_000_000, &fresh_host(), "finish").expect("run ok");
         assert_eq!(out.result, HostError::OutOfTransferLimit.code());
     }
+
+    // -----------------------------------------------------------------------
+    // The wasm `start` section runs at instantiation, before `finish`, and
+    // shares the run's fuel budget. So an expensive `start` must be caught by
+    // `run_escrow` exactly like an expensive `finish`.
+    //
+    // These drive fuel through *host calls* rather than raw wasm instructions:
+    // a host call's cost is the consensus-fixed base gas from its `HostFn`
+    // spec (`#[gas = N]`), so the budget and the consumed-gas assertion below
+    // are expressed in known units rather than opaque per-instruction fuel.
+    // -----------------------------------------------------------------------
+
+    /// A `start` function that calls a host function far more times than the
+    /// fuel budget can pay for runs out of fuel *during instantiation*.
+    /// `run_escrow` must surface that as an error (mapped from
+    /// `instantiate_and_start`) and never reach `finish`.
+    #[test]
+    fn start_section_out_of_fuel_is_caught() {
+        // Each `trace_num` call costs a known, consensus-fixed base gas.
+        let gas_per_call = host_functions::HostFn::TraceNum.spec().base_gas;
+
+        let wat = r#"
+            (module
+              (import "host" "trace_num" (func $trace_num (param i32 i32 i64) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "n")
+              (func $boot
+                (local $i i32)
+                (loop $again
+                  (drop (call $trace_num (i32.const 0) (i32.const 1) (i64.const 0)))
+                  (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                  (br_if $again (i32.lt_u (local.get $i) (i32.const 100000)))))
+              (start $boot)
+              (func (export "finish") (result i32)
+                (i32.const 1)))
+        "#;
+        let wasm = wat::parse_str(wat).expect("valid wat");
+
+        // Only enough gas for ~20 host calls; the start loop wants 100_000, so
+        // it must run out of fuel mid-`start`.
+        let budget = 20 * gas_per_call;
+        let err = run_escrow(&wasm, budget, &fresh_host(), "finish")
+            .expect_err("start running out of fuel should fail the run");
+
+        // Failed at instantiation (running `start`), not in `finish`: the error
+        // is mapped from `instantiate_and_start`, and the cause is fuel.
+        assert!(err.contains("instantiate"), "unexpected error: {err}");
+        assert!(err.contains("fuel"), "expected an out-of-fuel error: {err}");
+    }
+
+    /// Positive control that isolates the cause above with a *known* cost: a
+    /// `start` that makes exactly `N` host calls succeeds under a generous
+    /// budget, calls the host exactly `N` times, and burns at least
+    /// `N * base_gas` more fuel than a module whose `start` makes no host calls
+    /// — i.e. the start body really executed and was charged the consensus gas.
+    #[test]
+    fn start_section_runs_and_is_metered() {
+        const N: u64 = 10;
+        let gas_per_call = host_functions::HostFn::TraceNum.spec().base_gas;
+
+        let with_calls = wat::parse_str(
+            r#"
+            (module
+              (import "host" "trace_num" (func $trace_num (param i32 i32 i64) (result i32)))
+              (memory (export "memory") 1)
+              (data (i32.const 0) "n")
+              (func $boot
+                (local $i i32)
+                (loop $again
+                  (drop (call $trace_num (i32.const 0) (i32.const 1) (i64.const 0)))
+                  (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                  (br_if $again (i32.lt_u (local.get $i) (i32.const 10)))))
+              (start $boot)
+              (func (export "finish") (result i32) (i32.const 1)))
+            "#,
+        )
+        .expect("valid wat");
+        // Same shape, but `start` makes no host calls — the metered-gas baseline.
+        let no_calls = wat::parse_str(
+            r#"
+            (module
+              (func $boot)
+              (start $boot)
+              (func (export "finish") (result i32) (i32.const 1)))
+            "#,
+        )
+        .expect("valid wat");
+
+        // A host whose recording we can inspect, to confirm the call count.
+        let rec = Rc::new(Recording::default());
+        let host = MockHost {
+            ledger_sqn: 1,
+            rec: rec.clone(),
+        };
+        let with = run_escrow(&with_calls, 1_000_000, &host, "finish").expect("run ok");
+        let base = run_escrow(&no_calls, 1_000_000, &fresh_host(), "finish").expect("run ok");
+
+        assert_eq!(with.result, 1);
+        assert_eq!(base.result, 1);
+        // `start` invoked the host exactly N times...
+        assert_eq!(rec.nums.borrow().len(), N as usize);
+        // ...and paid at least the consensus base gas for each.
+        assert!(
+            with.fuel_used >= base.fuel_used + N * gas_per_call,
+            "expected >= {} extra gas from {} host calls; with={}, base={}",
+            N * gas_per_call,
+            N,
+            with.fuel_used,
+            base.fuel_used
+        );
+    }
 }
