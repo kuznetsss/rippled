@@ -1,11 +1,12 @@
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
 use syn::{
-    Attribute, Ident, LitInt, LitStr, PathArguments, ReceiverKind, ReturnType, Safety, Signature,
-    TraitItemFn, Type, TypePath, parse::Parse,
+    Attribute, Block, FnArg, GenericArgument, Ident, LitInt, LitStr, PathArguments, ReceiverKind,
+    ReturnType, Safety, Signature, TraitItemFn, Type, TypePath, parse::Parse,
 };
 
 use crate::errors;
+use crate::wasm_signature::{self, Encoding, HostReturn, Param, Region, Results};
 
 /// `#[gas = N]`: the base gas charged before the call runs.
 const GAS: &str = "gas";
@@ -26,11 +27,20 @@ pub(crate) struct ParsedHostFunction {
     pub(crate) docs: Vec<Attribute>,
     /// The enum variant this declaration becomes, spanned at the function name.
     pub(crate) variant: Ident,
+    /// The declaration as written, which the trait method is emitted from.
     pub(crate) signature: Signature,
+    /// The same parameters as the guest sees them. Declaration order is wasm
+    /// parameter order, so this is `signature.inputs` without the receiver.
+    // Deriving these is what validates a declaration against the wire; the
+    // generated items are emitted from `signature` and the ABI attributes.
+    #[allow(dead_code)]
+    pub(crate) wasm_params: Vec<Param>,
+    #[allow(dead_code)]
+    pub(crate) wasm_result: Results,
 }
 
 impl ParsedHostFunction {
-    /// `#[doc …] fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;`
+    /// `#[doc …] fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;`
     pub(crate) fn trait_method(&self) -> TokenStream {
         let docs = &self.docs;
         // The declaration is already a trait method: emitted verbatim, so what
@@ -66,75 +76,30 @@ impl ParsedHostFunction {
         }
     }
 
+    /// Every mistake in one declaration is collected before any is reported, so a
+    /// block is not fixed one diagnostic per build.
+    ///
+    /// The four steps below are also the order the mistakes are reported in, which
+    /// `reports_mistakes_in_a_fixed_order` pins: what the declaration is tagged
+    /// with, whether it is a declaration at all, what it means on the wire, and
+    /// what it becomes. A reader working top-down through one function's
+    /// diagnostics meets them in that order whatever else is wrong.
     pub(crate) fn parse(function: TraitItemFn) -> syn::Result<Self> {
-        let mut gas = None;
-        let mut wasm_name = None;
-        let mut docs = Vec::new();
+        let TraitItemFn {
+            attrs,
+            sig,
+            default,
+            ..
+        } = function;
         let mut errors = Vec::new();
 
-        // Tracked separately from `gas`/`wasm_name` so a malformed attribute is
-        // not also reported as a missing one.
-        let mut saw_gas = false;
-        let mut saw_wasm_name = false;
-
-        for attr in function.attrs {
-            if attr.path().is_ident(GAS) {
-                saw_gas = true;
-                if let Err(error) = int_value(&attr).and_then(|v| set_once(&mut gas, v, &attr)) {
-                    errors.push(error);
-                }
-            } else if attr.path().is_ident(WASM_NAME) {
-                saw_wasm_name = true;
-                if let Err(error) = value::<LitStr>(&attr, "a string literal")
-                    .and_then(|v| set_once(&mut wasm_name, v, &attr))
-                {
-                    errors.push(error);
-                }
-            } else if attr.path().is_ident(DOC) {
-                docs.push(attr);
-            } else {
-                errors.push(syn::Error::new_spanned(
-                    &attr,
-                    format!("unexpected attribute `{}`", path_name(&attr)),
-                ));
-            }
-        }
-
-        if !saw_gas {
-            errors.push(syn::Error::new_spanned(
-                &function.sig.ident,
-                format!("missing `#[{GAS} = ...]` attribute"),
-            ));
-        }
-        if !saw_wasm_name {
-            errors.push(syn::Error::new_spanned(
-                &function.sig.ident,
-                format!("missing `#[{WASM_NAME} = \"...\"]` attribute"),
-            ));
-        }
-        if let Some(body) = &function.default {
-            errors.push(syn::Error::new_spanned(
-                body,
-                "a host function is implemented by the host, so it must not have a body",
-            ));
-        }
-        if !function.sig.generics.params.is_empty() || function.sig.generics.where_clause.is_some()
-        {
-            errors.push(syn::Error::new_spanned(
-                &function.sig.ident,
-                "a host function must not be generic: it maps to one wasm import signature",
-            ));
-        }
-        errors.extend(check_receiver(&function.sig).err());
-        errors.extend(check_return_type(&function.sig).err());
-        if let Some(name) = &wasm_name {
-            errors.extend(check_wasm_name(name).err());
-        }
-        reject_modifiers(&function.sig, &mut errors);
+        let attributes = Attributes::parse(attrs, &sig.ident, &mut errors);
+        check_declaration(&sig, default.as_ref(), &mut errors);
+        let wasm = wasm_signature_of(&sig, &mut errors);
 
         // A name whose PascalCase form is not a legal variant is reported here
         // rather than emitted, which would either panic or fail downstream.
-        let variant = match variant_ident(&function.sig.ident) {
+        let variant = match variant_ident(&sig.ident) {
             Ok(variant) => Some(variant),
             Err(error) => {
                 errors.push(error);
@@ -146,17 +111,181 @@ impl ParsedHostFunction {
             return Err(error);
         }
 
-        let (Some(gas), Some(wasm_name), Some(variant)) = (gas, wasm_name, variant) else {
+        let (Some(gas), Some(wasm_name), Some(variant), Some((wasm_params, wasm_result))) =
+            (attributes.gas, attributes.wasm_name, variant, wasm)
+        else {
             unreachable!("every absent field is reported above");
         };
 
         Ok(Self {
             gas,
             wasm_name,
-            docs,
+            docs: attributes.docs,
             variant,
-            signature: function.sig,
+            signature: sig,
+            wasm_params,
+            wasm_result,
         })
+    }
+}
+
+/// The ABI attributes one declaration carries, and the doc comments to re-emit.
+struct Attributes {
+    gas: Option<u64>,
+    wasm_name: Option<LitStr>,
+    docs: Vec<Attribute>,
+}
+
+impl Attributes {
+    /// `ident` is where an absent attribute is reported, there being no attribute
+    /// to point at.
+    fn parse(attrs: Vec<Attribute>, ident: &Ident, errors: &mut Vec<syn::Error>) -> Self {
+        let mut parsed = Attributes {
+            gas: None,
+            wasm_name: None,
+            docs: Vec::new(),
+        };
+
+        // Tracked separately from the values so a malformed attribute is not also
+        // reported as a missing one.
+        let mut saw_gas = false;
+        let mut saw_wasm_name = false;
+
+        for attr in attrs {
+            if attr.path().is_ident(GAS) {
+                saw_gas = true;
+                if let Err(error) =
+                    int_value(&attr).and_then(|v| set_once(&mut parsed.gas, v, &attr))
+                {
+                    errors.push(error);
+                }
+            } else if attr.path().is_ident(WASM_NAME) {
+                saw_wasm_name = true;
+                if let Err(error) = value::<LitStr>(&attr, "a string literal")
+                    .and_then(|v| set_once(&mut parsed.wasm_name, v, &attr))
+                {
+                    errors.push(error);
+                }
+            } else if attr.path().is_ident(DOC) {
+                parsed.docs.push(attr);
+            } else {
+                errors.push(syn::Error::new_spanned(
+                    &attr,
+                    format!("unexpected attribute `{}`", path_name(&attr)),
+                ));
+            }
+        }
+
+        if !saw_gas {
+            errors.push(syn::Error::new_spanned(
+                ident,
+                format!("missing `#[{GAS} = ...]` attribute"),
+            ));
+        }
+        if !saw_wasm_name {
+            errors.push(syn::Error::new_spanned(
+                ident,
+                format!("missing `#[{WASM_NAME} = \"...\"]` attribute"),
+            ));
+        }
+        if let Some(name) = &parsed.wasm_name {
+            errors.extend(check_wasm_name(name).err());
+        }
+
+        parsed
+    }
+}
+
+/// What makes a declaration one: a plain `fn` over `&self`, with no body and no
+/// generics, because it maps to exactly one wasm import signature.
+fn check_declaration(signature: &Signature, body: Option<&Block>, errors: &mut Vec<syn::Error>) {
+    if let Some(body) = body {
+        errors.push(syn::Error::new_spanned(
+            body,
+            "a host function is implemented by the host, so it must not have a body",
+        ));
+    }
+    if !signature.generics.params.is_empty() || signature.generics.where_clause.is_some() {
+        errors.push(syn::Error::new_spanned(
+            &signature.ident,
+            "a host function must not be generic: it maps to one wasm import signature",
+        ));
+    }
+    errors.extend(check_receiver(signature).err());
+    reject_modifiers(signature, errors);
+}
+
+/// The declaration as the guest sees it: the parameters without the receiver, and
+/// the wasm result the return type gives.
+///
+/// The two are read together because the rule between them — a length is reported
+/// only into an out buffer — needs both. `None` always comes with a reported error.
+fn wasm_signature_of(
+    signature: &Signature,
+    errors: &mut Vec<syn::Error>,
+) -> Option<(Vec<Param>, Results)> {
+    let declared: Vec<&FnArg> = signature
+        .inputs
+        .iter()
+        .filter(|arg| !matches!(arg, FnArg::Receiver(_)))
+        .collect();
+
+    let mut params = Vec::with_capacity(declared.len());
+    for arg in &declared {
+        match wasm_signature::param(arg) {
+            Ok(param) => params.push(param),
+            Err(error) => errors.push(error),
+        }
+    }
+
+    let host_return = match returned_type(signature).and_then(wasm_signature::host_return) {
+        Ok(host_return) => host_return,
+        Err(error) => {
+            errors.push(error);
+            return None;
+        }
+    };
+
+    // A parameter that could not be read is absent from `params`, and the rule below
+    // would report it a second time as a missing out buffer.
+    if params.len() != declared.len() {
+        return None;
+    }
+    errors.extend(check_result_against_out_buffers(signature, host_return, &params).err());
+
+    Some((params, host_return.into()))
+}
+
+/// A `usize` return is the length of a value the host wrote, so it says nothing
+/// unless there is a buffer it was written into. The two are declared together or
+/// neither is.
+///
+/// This is what makes the wasm signature derivable from the declaration alone:
+/// which helper marshals a function, and whether it reports a length, is read off
+/// the parameters and the return type agreeing.
+fn check_result_against_out_buffers(
+    signature: &Signature,
+    host_return: HostReturn,
+    params: &[Param],
+) -> syn::Result<()> {
+    let out_buffers = params
+        .iter()
+        .filter(|param| matches!(param.encoding, Encoding::Region(Region::OutBytes)))
+        .count();
+
+    match (host_return, out_buffers) {
+        (HostReturn::BufferLength, 0) => Err(syn::Error::new_spanned(
+            &signature.output,
+            "a host function returning `HostResult<usize>` reports the length of a \
+             value it wrote, so it must take an out buffer: `out: &mut [u8]`",
+        )),
+        (HostReturn::Value | HostReturn::Nothing, 1..) => Err(syn::Error::new_spanned(
+            &signature.output,
+            "a host function taking an out buffer must return `HostResult<usize>`: \
+             the length is how a guest whose buffer was too small learns the size to \
+             ask for",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -189,14 +318,14 @@ fn check_receiver(signature: &Signature) -> syn::Result<()> {
     Ok(())
 }
 
-/// Every declaration returns `HostResult<T>`, including the ones that yield
-/// nothing (`HostResult<()>`).
+/// The `T` of every declaration's `HostResult<T>`, including the `()` of the ones
+/// that yield nothing.
 ///
 /// One shape for every function is what lets a single dispatch adapter lower them
 /// all: lift the arguments out of guest memory, call the host, then turn `Ok(T)`
 /// into the wire's non-negative `i32` and `Err(e)` into a negative code or a trap.
 /// A function returning a bare `T` would need its own arm.
-fn check_return_type(signature: &Signature) -> syn::Result<()> {
+fn returned_type(signature: &Signature) -> syn::Result<&Type> {
     const SHAPE: &str = "a host function must return `HostResult<T>` — \
                          `HostResult<()>` if it yields nothing";
 
@@ -232,7 +361,13 @@ fn check_return_type(signature: &Signature) -> syn::Result<()> {
             format!("`{HOST_RESULT}` takes exactly one type: `{HOST_RESULT}<T>`"),
         ));
     }
-    Ok(())
+    let Some(GenericArgument::Type(success)) = arguments.args.first() else {
+        return Err(syn::Error::new_spanned(
+            arguments,
+            format!("`{HOST_RESULT}` takes a type, not a lifetime or a constant"),
+        ));
+    };
+    Ok(success)
 }
 
 /// `const`, `async`, `unsafe`/`safe` and `extern "…"` have no meaning in the
@@ -400,7 +535,7 @@ mod tests {
         let parsed = ParsedHostFunction::parse(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         })
         .unwrap();
 
@@ -471,7 +606,7 @@ mod tests {
         let messages = messages(parse_quote! {
             #[gas = -5]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
 
         assert_eq!(messages.len(), 1, "{messages:?}");
@@ -483,7 +618,7 @@ mod tests {
         let empty = messages(parse_quote! {
             #[gas = 60]
             #[wasm_name = ""]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
         assert_eq!(empty.len(), 1, "{empty:?}");
         assert_eq!(empty[0], "the wasm name must not be empty");
@@ -491,7 +626,7 @@ mod tests {
         let spaced = messages(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
         assert_eq!(spaced.len(), 1, "{spaced:?}");
         assert!(spaced[0].contains("may only contain"), "{spaced:?}");
@@ -500,10 +635,10 @@ mod tests {
     #[test]
     fn rejects_signature_modifiers() {
         for declaration in [
-            quote! { unsafe fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>; },
-            quote! { async fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>; },
-            quote! { const fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>; },
-            quote! { extern "C" fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>; },
+            quote! { unsafe fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>; },
+            quote! { async fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>; },
+            quote! { const fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>; },
+            quote! { extern "C" fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>; },
         ] {
             let function: TraitItemFn = syn::parse2(quote! {
                 #[gas = 60]
@@ -524,7 +659,7 @@ mod tests {
             /// Hashes `data`.
             #[gas = 2000]
             #[wasm_name = "sha512_half"]
-            fn sha512_half(&self, data: &[u8]) -> HostResult<[u8; 32]>;
+            fn sha512_half(&self, data: &[u8], out: &mut [u8]) -> HostResult<usize>;
         })
         .unwrap();
 
@@ -537,7 +672,7 @@ mod tests {
         );
         assert!(
             method
-                .contains("fn sha512_half (& self , data : & [u8]) -> HostResult < [u8 ; 32] > ;"),
+                .contains("fn sha512_half (& self , data : & [u8] , out : & mut [u8]) -> HostResult < usize > ;"),
             "{method}"
         );
     }
@@ -547,7 +682,7 @@ mod tests {
         let parsed = ParsedHostFunction::parse(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         })
         .unwrap();
 
@@ -565,7 +700,7 @@ mod tests {
             /// Third line.
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         })
         .unwrap();
 
@@ -578,7 +713,7 @@ mod tests {
         let traced = ParsedHostFunction::parse(parse_quote! {
             #[gas = 500]
             #[wasm_name = "trace"]
-            fn trace(&self, msg: &str, data: &[u8], as_hex: bool) -> HostResult<()>;
+            fn trace(&self, msg: &str, data_type: TraceDataType, data: &[u8]) -> HostResult<()>;
         })
         .unwrap();
         // The receiver is `inputs[0]`; the three wasm parameters follow it.
@@ -591,19 +726,19 @@ mod tests {
         let hashed = ParsedHostFunction::parse(parse_quote! {
             #[gas = 2000]
             #[wasm_name = "sha512_half"]
-            fn sha512_half(&self, data: &[u8]) -> HostResult<[u8; HASH_LEN]>;
+            fn sha512_half(&self, data: &[u8], out: &mut [u8]) -> HostResult<usize>;
         })
         .unwrap();
         assert_eq!(
             hashed.signature.output.to_token_stream().to_string(),
-            "-> HostResult < [u8 ; HASH_LEN] >"
+            "-> HostResult < usize >"
         );
     }
 
     #[test]
     fn reports_both_missing_attributes_at_once() {
         let messages = messages(parse_quote! {
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
 
         assert_eq!(messages.len(), 2);
@@ -616,7 +751,7 @@ mod tests {
         let messages = messages(parse_quote! {
             #[gas = 60]
             #[wsam_name = "typo"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
 
         // The typo'd attribute, plus the `wasm_name` it failed to be.
@@ -632,7 +767,7 @@ mod tests {
         let gas = messages(parse_quote! {
             #[gas = "60"]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
         assert_eq!(gas.len(), 1, "{gas:?}");
         assert!(
@@ -643,7 +778,7 @@ mod tests {
         let name = messages(parse_quote! {
             #[gas = 60]
             #[wasm_name = 7]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
         assert_eq!(name.len(), 1, "{name:?}");
         assert!(
@@ -657,7 +792,7 @@ mod tests {
         let messages = messages(parse_quote! {
             #[gas = 99999999999999999999999]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
 
         assert_eq!(messages.len(), 1, "{messages:?}");
@@ -669,7 +804,7 @@ mod tests {
         let bare = messages(parse_quote! {
             #[gas]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
         assert_eq!(bare.len(), 1, "{bare:?}");
         assert!(bare[0].contains("gas = ..."), "{bare:?}");
@@ -677,7 +812,7 @@ mod tests {
         let list = messages(parse_quote! {
             #[gas(60)]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
         assert_eq!(list.len(), 1, "{list:?}");
     }
@@ -689,7 +824,7 @@ mod tests {
             #[gas = 70]
             #[wasm_name = "ldgr_index"]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
 
         assert_eq!(messages.len(), 2, "{messages:?}");
@@ -706,7 +841,7 @@ mod tests {
         let messages = messages(parse_quote! {
             #[gas = "60"]
             #[wasm_name = 7]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
 
         assert_eq!(messages.len(), 2, "{messages:?}");
@@ -721,7 +856,7 @@ mod tests {
         let messages = messages(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> { Ok([0; 4]) }
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize> { Ok(0) }
         });
 
         assert_eq!(messages.len(), 1, "{messages:?}");
@@ -733,7 +868,7 @@ mod tests {
         let parameter = messages(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn<T>(&self) -> HostResult<T>;
+            fn get_ledger_sqn<T>(&self, out: &mut [u8]) -> HostResult<usize>;
         });
         assert_eq!(parameter.len(), 1, "{parameter:?}");
         assert!(
@@ -744,7 +879,7 @@ mod tests {
         let clause = messages(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]> where Self: Sized;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize> where Self: Sized;
         });
         assert_eq!(clause.len(), 1, "{clause:?}");
     }
@@ -754,7 +889,7 @@ mod tests {
         let messages = messages(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn() -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(out: &mut [u8]) -> HostResult<usize>;
         });
 
         assert_eq!(messages.len(), 1, "{messages:?}");
@@ -778,7 +913,7 @@ mod tests {
             let function: TraitItemFn = syn::parse2(quote! {
                 #[gas = 60]
                 #[wasm_name = "ldgr_index"]
-                fn get_ledger_sqn(#receiver) -> HostResult<[u8; 4]>;
+                fn get_ledger_sqn(#receiver, out: &mut [u8]) -> HostResult<usize>;
             })
             .unwrap_or_else(|_| panic!("`{receiver}` should parse"));
 
@@ -826,7 +961,7 @@ mod tests {
         let parsed = ParsedHostFunction::parse(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> xrpl_host_functions::HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> xrpl_host_functions::HostResult<usize>;
         })
         .unwrap();
 
@@ -834,7 +969,7 @@ mod tests {
             parsed
                 .trait_method()
                 .to_string()
-                .contains("xrpl_host_functions :: HostResult < [u8 ; 4] >"),
+                .contains("xrpl_host_functions :: HostResult < usize >"),
             "{}",
             parsed.trait_method()
         );
@@ -855,5 +990,181 @@ mod tests {
             messages[0].contains("needs its success type"),
             "{messages:?}"
         );
+    }
+
+    /// The declared parameters and the wasm ones are not the same list: three
+    /// parameters here are six on the wire, and that is the count nothing else in
+    /// the tree used to know.
+    #[test]
+    fn records_the_wasm_signature() {
+        let parsed = ParsedHostFunction::parse(parse_quote! {
+            #[gas = 350]
+            #[wasm_name = "check_id"]
+            fn check_keylet(&self, account: &[u8], seq: u32, out: &mut [u8]) -> HostResult<usize>;
+        })
+        .unwrap();
+
+        assert_eq!(
+            parsed
+                .wasm_params
+                .iter()
+                .map(|param| param.encoding)
+                .collect::<Vec<_>>(),
+            vec![
+                Encoding::Region(Region::InBytes),
+                Encoding::Region(Region::InU32),
+                Encoding::Region(Region::OutBytes),
+            ],
+        );
+        assert_eq!(total_wasm_params(&parsed), 6);
+        assert_eq!(parsed.wasm_result, Results::I32);
+    }
+
+    /// `trace`'s shape: a `TraceDataType` is one wasm parameter rather than two,
+    /// and returning `()` is the only thing that empties the result list.
+    #[test]
+    fn records_a_declaration_with_no_wasm_result() {
+        let parsed = ParsedHostFunction::parse(parse_quote! {
+            #[gas = 30]
+            #[wasm_name = "trace"]
+            fn trace(&self, msg: &str, data_type: TraceDataType, data: &[u8]) -> HostResult<()>;
+        })
+        .unwrap();
+
+        assert_eq!(total_wasm_params(&parsed), 5);
+        assert_eq!(parsed.wasm_result, Results::Empty);
+    }
+
+    /// A `usize` is the length of a value the host wrote, so a declaration that
+    /// returns one without offering a buffer to write into says nothing.
+    #[test]
+    fn rejects_a_length_return_with_no_out_buffer() {
+        let messages = messages(parse_quote! {
+            #[gas = 60]
+            #[wasm_name = "ldgr_index"]
+            fn get_ledger_sqn(&self) -> HostResult<usize>;
+        });
+
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("must take an out buffer"),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_an_out_buffer_without_a_length_return() {
+        for output in [quote! { HostResult<i32> }, quote! { HostResult<()> }] {
+            let function: TraitItemFn = syn::parse2(quote! {
+                #[gas = 60]
+                #[wasm_name = "ldgr_index"]
+                fn get_ledger_sqn(&self, out: &mut [u8]) -> #output;
+            })
+            .unwrap();
+
+            let messages = messages(function);
+            assert_eq!(messages.len(), 1, "`{output}`: {messages:?}");
+            assert!(
+                messages[0].contains("must return `HostResult<usize>`"),
+                "`{output}`: {messages:?}"
+            );
+        }
+    }
+
+    /// The rule is that there is a buffer at all, not how many: `float_to_mant_exp`
+    /// declares two.
+    #[test]
+    fn accepts_more_than_one_out_buffer() {
+        let parsed = ParsedHostFunction::parse(parse_quote! {
+            #[gas = 400]
+            #[wasm_name = "float_to_mant_exp"]
+            fn float_to_mant_exp(
+                &self,
+                float: &[u8],
+                mantissa: &mut [u8],
+                exponent: &mut [u8],
+            ) -> HostResult<usize>;
+        })
+        .unwrap();
+
+        assert_eq!(total_wasm_params(&parsed), 6);
+    }
+
+    #[test]
+    fn reports_every_unusable_parameter() {
+        let messages = messages(parse_quote! {
+            #[gas = 60]
+            #[wasm_name = "ldgr_index"]
+            fn get_ledger_sqn(&self, a: Vec<u8>, b: bool, out: &mut [u8]) -> HostResult<usize>;
+        });
+
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages[0].contains("`Vec<u8>`"), "{messages:?}");
+        assert!(messages[1].contains("`bool`"), "{messages:?}");
+    }
+
+    /// One mistake, one diagnostic: the parameter that could not be read is the one
+    /// the out-buffer rule would otherwise report a second time as absent.
+    #[test]
+    fn does_not_report_an_unusable_parameter_as_a_missing_out_buffer() {
+        let messages = messages(parse_quote! {
+            #[gas = 60]
+            #[wasm_name = "ldgr_index"]
+            fn get_ledger_sqn(&self, out: Vec<u8>) -> HostResult<usize>;
+        });
+
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("not a wasm parameter type"),
+            "{messages:?}"
+        );
+    }
+
+    /// A declaration wrong in four ways at once reports all four, in the order
+    /// `parse` runs its steps. Nothing downstream depends on the order, but a
+    /// reader does, and it is otherwise decided by accident.
+    #[test]
+    fn reports_mistakes_in_a_fixed_order() {
+        let messages = messages(parse_quote! {
+            #[gas = 60]
+            #[wasm_name = "ldgr index"]
+            async fn get_ledger_sqn<T>(&self, data: Vec<u8>) -> HostResult<usize>;
+        });
+
+        assert_eq!(messages.len(), 4, "{messages:?}");
+        // The attributes, then the declaration's shape, then the wire, then the
+        // name it becomes.
+        assert!(messages[0].contains("may only contain"), "{messages:?}");
+        assert!(messages[1].contains("must not be generic"), "{messages:?}");
+        assert!(messages[2].contains("must be a plain `fn`"), "{messages:?}");
+        assert!(
+            messages[3].contains("not a wasm parameter type"),
+            "{messages:?}"
+        );
+    }
+
+    /// Neither half of the rule fires when a function returns a value and writes
+    /// into nothing, which is what the 13 `HostResult<i32>` declarations are.
+    #[test]
+    fn accepts_a_value_return_with_no_out_buffer() {
+        for output in [quote! { HostResult<i32> }, quote! { HostResult<()> }] {
+            let function: TraitItemFn = syn::parse2(quote! {
+                #[gas = 60]
+                #[wasm_name = "ldgr_index"]
+                fn get_ledger_sqn(&self, locator: &[u8]) -> #output;
+            })
+            .unwrap();
+
+            ParsedHostFunction::parse(function)
+                .unwrap_or_else(|_| panic!("`{output}` with no out buffer should be accepted"));
+        }
+    }
+
+    fn total_wasm_params(parsed: &ParsedHostFunction) -> usize {
+        parsed
+            .wasm_params
+            .iter()
+            .map(|param| param.encoding.wasm_param_count())
+            .sum()
     }
 }

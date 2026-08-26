@@ -1,5 +1,6 @@
 mod errors;
 mod parsed_host_function;
+mod wasm_signature;
 
 use std::collections::HashSet;
 
@@ -159,6 +160,22 @@ fn generate(functions: &[ParsedHostFunction]) -> TokenStream {
         /// written; its `&self` receiver is not part of the ABI the guest sees,
         /// so a host that must mutate does so behind interior mutability.
         ///
+        /// # What a method may return
+        ///
+        /// Three shapes, and the declaration block is rejected for any other:
+        ///
+        /// - `HostResult<usize>` — the length of a value written into an out
+        ///   buffer, so the method takes one.
+        /// - `HostResult<i32>` — the value itself, from a method that writes into
+        ///   no buffer. **This is also how a method that reports only a status
+        ///   says so.**
+        /// - `HostResult<()>` — nothing, and so **the wasm function has no result
+        ///   at all**. A guest learns neither success nor failure from it.
+        ///
+        /// The last two are the pair to keep straight when adding a function:
+        /// returning `()` is not "succeeded with nothing to say", it is "the guest
+        /// is told nothing", and it changes the wasm signature.
+        ///
         /// # The output contract
         ///
         /// A method handed an `out` buffer **writes into it only when the whole
@@ -265,10 +282,10 @@ mod tests {
     fn reports_mistakes_from_every_function() {
         let error = expand(quote! {
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
 
             #[gas = 2000]
-            fn sha512_half(&self, data: &[u8]) -> HostResult<[u8; 32]>;
+            fn sha512_half(&self, data: &[u8], out: &mut [u8]) -> HostResult<usize>;
         })
         .expect_err("expected parsing to fail");
 
@@ -292,12 +309,54 @@ mod tests {
         error.into_iter().map(|error| error.to_string()).collect()
     }
 
+    /// Nothing is appended behind the reader's back: a declaration reaches the
+    /// trait exactly as written, whatever its parameters lower to. The block below
+    /// covers every type the ABI may declare, so a lowering that started rewriting
+    /// signatures would fail here rather than in the crate that reads them.
+    #[test]
+    fn emits_every_declaration_verbatim() {
+        let generated = expand(quote! {
+            /// Doc.
+            #[gas = 60]
+            #[wasm_name = "ldgr_index"]
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
+
+            #[gas = 350]
+            #[wasm_name = "check_id"]
+            fn check_keylet(&self, account: &[u8], seq: u32, out: &mut [u8]) -> HostResult<usize>;
+
+            #[gas = 30]
+            #[wasm_name = "trace"]
+            fn trace(&self, msg: &str, data_type: TraceDataType, data: &[u8]) -> HostResult<()>;
+
+            #[gas = 400]
+            #[wasm_name = "float_from_int"]
+            fn float_from_int(&self, x: i64, out: &mut [u8], mode: i32) -> HostResult<usize>;
+
+            #[gas = 100]
+            #[wasm_name = "get_tx_array_len"]
+            fn get_tx_array_len(&self, field: i32) -> HostResult<i32>;
+        })
+        .unwrap()
+        .to_string();
+
+        for declaration in [
+            "fn get_ledger_sqn (& self , out : & mut [u8]) -> HostResult < usize > ;",
+            "fn check_keylet (& self , account : & [u8] , seq : u32 , out : & mut [u8]) -> HostResult < usize > ;",
+            "fn trace (& self , msg : & str , data_type : TraceDataType , data : & [u8]) -> HostResult < () > ;",
+            "fn float_from_int (& self , x : i64 , out : & mut [u8] , mode : i32) -> HostResult < usize > ;",
+            "fn get_tx_array_len (& self , field : i32) -> HostResult < i32 > ;",
+        ] {
+            assert!(generated.contains(declaration), "missing {declaration:?}");
+        }
+    }
+
     #[test]
     fn generates_the_trait_the_enum_and_the_table() {
         let generated = expand(quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
 
             #[gas = 500]
             #[wasm_name = "trace_num"]
@@ -308,7 +367,7 @@ mod tests {
 
         for expected in [
             "pub trait HostFunctions",
-            "fn get_ledger_sqn (& self) -> HostResult < [u8 ; 4] > ;",
+            "fn get_ledger_sqn (& self , out : & mut [u8]) -> HostResult < usize > ;",
             "fn trace_num (& self , msg : & str , number : i64) -> HostResult < () > ;",
             "pub enum HostFunctionSpec { GetLedgerSqn , TraceNum , }",
             "pub const ALL : & 'static [Self] = & [Self :: GetLedgerSqn , Self :: TraceNum ,]",
@@ -330,7 +389,7 @@ mod tests {
         let generated = expand(quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         })
         .unwrap()
         .to_string();
@@ -355,7 +414,7 @@ mod tests {
         let generated = expand(quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         })
         .unwrap()
         .to_string();
@@ -389,11 +448,11 @@ mod tests {
         let messages = messages(quote! {
             #[gas = 60]
             #[wasm_name = "a"]
-            fn get_ledger_sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger_sqn(&self, out: &mut [u8]) -> HostResult<usize>;
 
             #[gas = 70]
             #[wasm_name = "b"]
-            fn get_ledger__sqn(&self) -> HostResult<[u8; 4]>;
+            fn get_ledger__sqn(&self, out: &mut [u8]) -> HostResult<usize>;
         });
 
         assert_eq!(messages.len(), 1, "{messages:?}");
