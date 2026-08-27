@@ -6,7 +6,7 @@ use syn::{
 };
 
 use crate::errors;
-use crate::wasm_signature::{self, Encoding, HostReturn, Param, Region, Results};
+use crate::wasm_signature::{self, Encoding, HostReturn, Param, Region, WasmResult};
 
 /// `#[gas = N]`: the base gas charged before the call runs.
 const GAS: &str = "gas";
@@ -31,12 +31,8 @@ pub(crate) struct ParsedHostFunction {
     pub(crate) signature: Signature,
     /// The same parameters as the guest sees them. Declaration order is wasm
     /// parameter order, so this is `signature.inputs` without the receiver.
-    // Deriving these is what validates a declaration against the wire; the
-    // generated items are emitted from `signature` and the ABI attributes.
-    #[allow(dead_code)]
     pub(crate) wasm_params: Vec<Param>,
-    #[allow(dead_code)]
-    pub(crate) wasm_result: Results,
+    pub(crate) wasm_result: WasmResult,
 }
 
 impl ParsedHostFunction {
@@ -63,16 +59,34 @@ impl ParsedHostFunction {
         }
     }
 
-    /// `Self::GetLedgerSqn => HostFnSpec { name: "ldgr_index", gas: 60u64 }`
+    /// `Self::GetLedgerSqn => HostFnSpec { name: "ldgr_index", gas: 60u64, params:
+    /// &[WasmValType::I32, WasmValType::I32], result: Some(WasmValType::I32) }`
+    ///
+    /// One arm carries everything the ABI knows about a function, so the declaration
+    /// it came from is the only place any of it is stated.
     pub(crate) fn spec_arm(&self) -> TokenStream {
         let Self {
             gas,
             wasm_name,
             variant,
+            wasm_params,
+            wasm_result,
             ..
         } = self;
+        // The declaration's parameters flattened: this is where three declared
+        // parameters become six wasm ones.
+        let params = wasm_params
+            .iter()
+            .flat_map(|param| param.encoding.wasm_types());
+        let result = wasm_result.wasm_type();
+
         quote! {
-            Self::#variant => HostFnSpec { name: #wasm_name, gas: #gas }
+            Self::#variant => HostFnSpec {
+                name: #wasm_name,
+                gas: #gas,
+                params: &[#(#params,)*],
+                result: #result,
+            }
         }
     }
 
@@ -223,7 +237,7 @@ fn check_declaration(signature: &Signature, body: Option<&Block>, errors: &mut V
 fn wasm_signature_of(
     signature: &Signature,
     errors: &mut Vec<syn::Error>,
-) -> Option<(Vec<Param>, Results)> {
+) -> Option<(Vec<Param>, WasmResult)> {
     let declared: Vec<&FnArg> = signature
         .inputs
         .iter()
@@ -677,8 +691,13 @@ mod tests {
         );
     }
 
+    /// One arm carries everything the ABI knows about a function, the wasm signature
+    /// included — so the signature is stated where the gas and the import name are,
+    /// and nowhere a second time.
     #[test]
-    fn spec_arm_carries_the_name_and_the_gas() {
+    fn spec_arm_carries_the_whole_abi_row() {
+        // One `&mut [u8]` is a `(ptr, len)` pair, and a `usize` return is the
+        // buffer's true length reported as an `i32`.
         let parsed = ParsedHostFunction::parse(parse_quote! {
             #[gas = 60]
             #[wasm_name = "ldgr_index"]
@@ -688,7 +707,25 @@ mod tests {
 
         assert_eq!(
             parsed.spec_arm().to_string(),
-            "Self :: GetLedgerSqn => HostFnSpec { name : \"ldgr_index\" , gas : 60u64 }"
+            "Self :: GetLedgerSqn => HostFnSpec { name : \"ldgr_index\" , gas : 60u64 , \
+             params : & [WasmValType :: I32 , WasmValType :: I32 ,] , \
+             result : Some (WasmValType :: I32) , }"
+        );
+
+        // `&str` is a pair too, `i64` crosses as itself, and a host returning nothing
+        // leaves the wasm function with no result.
+        let parsed = ParsedHostFunction::parse(parse_quote! {
+            #[gas = 500]
+            #[wasm_name = "trace_num"]
+            fn trace_num(&self, msg: &str, number: i64) -> HostResult<()>;
+        })
+        .unwrap();
+
+        assert_eq!(
+            parsed.spec_arm().to_string(),
+            "Self :: TraceNum => HostFnSpec { name : \"trace_num\" , gas : 500u64 , \
+             params : & [WasmValType :: I32 , WasmValType :: I32 , WasmValType :: I64 ,] , \
+             result : None , }"
         );
     }
 
@@ -1017,11 +1054,11 @@ mod tests {
             ],
         );
         assert_eq!(total_wasm_params(&parsed), 6);
-        assert_eq!(parsed.wasm_result, Results::I32);
+        assert_eq!(parsed.wasm_result, WasmResult::I32);
     }
 
     /// `trace`'s shape: a `TraceDataType` is one wasm parameter rather than two,
-    /// and returning `()` is the only thing that empties the result list.
+    /// and returning `()` is the only thing that leaves a function with no result.
     #[test]
     fn records_a_declaration_with_no_wasm_result() {
         let parsed = ParsedHostFunction::parse(parse_quote! {
@@ -1032,7 +1069,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(total_wasm_params(&parsed), 5);
-        assert_eq!(parsed.wasm_result, Results::Empty);
+        assert_eq!(parsed.wasm_result, WasmResult::Nothing);
     }
 
     /// A `usize` is the length of a value the host wrote, so a declaration that
@@ -1164,7 +1201,7 @@ mod tests {
         parsed
             .wasm_params
             .iter()
-            .map(|param| param.encoding.wasm_param_count())
+            .map(|param| param.encoding.wasm_types().len())
             .sum()
     }
 }

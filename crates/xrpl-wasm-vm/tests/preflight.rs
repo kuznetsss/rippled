@@ -7,7 +7,7 @@
 mod support;
 
 use support::{ENTRY, FakeHost, ONE_PAGE, PLENTY_OF_GAS, assemble, import, module};
-use xrpl_host_functions::HostFunctionSpec;
+use xrpl_host_functions::{HOST_MODULE, HostFunctionSpec, WasmValType};
 use xrpl_wasm_vm::{CheckError, MAX_MEMORY_PAGES, MAX_TABLE_ELEMENTS, RunError};
 
 /// Assert which stage screening refused a module at, because the caller maps the
@@ -162,6 +162,9 @@ const ALL_IMPORTS: [&str; 61] = [
     import::FLOAT_POW,
 ];
 
+/// The 61 imports above are written by hand, so putting them through the signature
+/// check compares them against the table the ABI derives from its declarations —
+/// two statements of the wire, one of them not generated from the other.
 #[test]
 fn every_declared_host_function_may_be_imported() {
     assert_eq!(
@@ -173,6 +176,69 @@ fn every_declared_host_function_may_be_imported() {
     let mut parts = ALL_IMPORTS.to_vec();
     parts.push(ONE_PAGE);
     passes(&module(&parts, "(i32.const 0)"));
+}
+
+/// One `(import …)` for `function`, typed as [`HostFunctionSpec::wasm_params`] and
+/// [`HostFunctionSpec::wasm_result`] report it. Unnamed: nothing calls these, and
+/// linking resolves an import by its module and name.
+fn declared_import(function: HostFunctionSpec) -> String {
+    fn to_str(ty: WasmValType) -> &'static str {
+        match ty {
+            WasmValType::I32 => "i32",
+            WasmValType::I64 => "i64",
+        }
+    }
+
+    let params = match function.wasm_params() {
+        [] => String::new(),
+        params => format!(
+            " (param {})",
+            params
+                .iter()
+                .map(|ty| to_str(*ty))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    };
+    let result = match function.wasm_result() {
+        None => String::new(),
+        Some(ty) => format!(" (result {})", to_str(ty)),
+    };
+
+    format!(
+        r#"(import "{HOST_MODULE}" "{name}" (func{params}{result}))"#,
+        name = function.wasm_name()
+    )
+}
+
+/// **The probe.** A module whose imports are spelled from the ABI's signature table,
+/// instantiated against the engine that registers them: if the two disagree about
+/// any of the 61, linking refuses the module and this fails.
+///
+/// It is the only test that covers the whole ABI's wire shape at once, and the only
+/// one that reaches the guest's side of instantiation — the module name and all 61
+/// types together. `run` rather than `check`, because instantiation is where an
+/// import's type is matched; screening it too is what pins that the earlier stage
+/// agrees.
+#[test]
+fn a_module_importing_every_host_function_runs() {
+    let imports: Vec<String> = HostFunctionSpec::ALL
+        .iter()
+        .copied()
+        .map(declared_import)
+        .collect();
+    let mut parts: Vec<&str> = imports.iter().map(String::as_str).collect();
+    parts.push(ONE_PAGE);
+
+    let wat = module(&parts, "(i32.const 0)");
+
+    passes(&wat);
+    assert_eq!(
+        support::run(&wat, &FakeHost::new())
+            .expect("a module importing the declared signatures must link")
+            .result,
+        0
+    );
 }
 
 /// A module may import fewer host functions than are registered, but not more.
@@ -245,27 +311,49 @@ fn the_earlier_stage_is_the_one_reported() {
     assert_stage!(refusal, CheckError::Import(_));
 }
 
-/// The signature is the one part of an import screening does not compare, so a
-/// module that will not link can still pass. Recorded here because it is the gap
-/// this stage leaves, not because it is wanted.
+/// An import of the right name with the wrong type is refused, and the refusal names
+/// both shapes.
+///
+/// **Every way a signature can be wrong** — the same five `vm_limits.rs`'s
+/// `an_import_with_the_wrong_signature_fails_instantiation` walks, so the two stages
+/// are held to one enumeration rather than to whichever cases each file happened to
+/// pick.
+///
+/// Each is then run, which is what shows what the check moved: none of these modules
+/// could ever have run — instantiation refuses them too — so screening turns away
+/// nothing runnable. What changed is *which stage* refuses it, and so which TER a
+/// caller maps it to.
 #[test]
-fn an_import_with_the_wrong_signature_still_passes() {
-    let wat = module(
-        &[
-            r#"(import "host_lib" "ldgr_index" (func $f (param i64 i64) (result i32)))"#,
-            ONE_PAGE,
-        ],
-        "(i32.const 0)",
-    );
-    passes(&wat);
+fn an_import_with_the_wrong_signature_does_not_pass() {
+    for (signature, found) in [
+        ("(param i32) (result i32)", "(i32) -> i32"),
+        ("(param i32 i32 i32) (result i32)", "(i32, i32, i32) -> i32"),
+        ("(param i64 i64) (result i32)", "(i64, i64) -> i32"),
+        ("(param i32 i32) (result i64)", "(i32, i32) -> i64"),
+        ("(param i32 i32)", "(i32, i32) -> ()"),
+    ] {
+        let wat = module(
+            &[
+                &format!(r#"(import "host_lib" "ldgr_index" (func $f {signature}))"#),
+                ONE_PAGE,
+            ],
+            "(i32.const 0)",
+        );
 
-    let host = FakeHost::new();
-    let failure = xrpl_wasm_vm::run(&assemble(&wat), PLENTY_OF_GAS, &host, ENTRY)
-        .expect_err("a mistyped import must not link");
-    assert!(
-        matches!(failure.error, RunError::Instantiate(_)),
-        "{failure}"
-    );
+        let refusal = assert_stage!(refusal(&wat), CheckError::Import(_)).to_string();
+        assert!(
+            refusal.contains(&format!("expected '(i32, i32) -> i32', found '{found}'")),
+            "{signature}: {refusal}"
+        );
+
+        let host = FakeHost::new();
+        let failure = xrpl_wasm_vm::run(&assemble(&wat), PLENTY_OF_GAS, &host, ENTRY)
+            .expect_err("a mistyped import does not link either");
+        assert!(
+            matches!(failure.error, RunError::Instantiate(_)),
+            "{signature}: {failure}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

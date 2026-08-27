@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use xrpl_host_functions::{
-    HASH_LEN, HostError, HostFunctionSpec, HostFunctions, HostResult, TraceDataType,
+    HASH_LEN, HostError, HostFunctionSpec, HostFunctions, HostResult, TraceDataType, WasmValType,
 };
 
 /// Records what it was asked to do; enough to prove the trait is usable.
@@ -876,85 +876,125 @@ fn the_trait_is_callable_through_a_shared_trait_object() {
     assert_eq!(*fake.traced.borrow(), ["count/Int64/8"]);
 }
 
-/// The whole table, written out: the one place the ABI's wire names and gas costs
-/// appear as literals, and a deliberate change-detector, since both are consensus
-/// input. Everything else reads `HostFunctionSpec::gas()` instead.
+/// The whole table, written out: the one place the ABI's wire names, gas costs and
+/// wasm parameter lists appear as literals, and a deliberate change-detector, since
+/// all three are consensus input. Everything else reads the accessors instead.
+///
+/// The parameter list is **derived** from the declaration rather than stated beside
+/// it, so each row is a claim about that derivation too: `i32` and `i64` cross as
+/// themselves, and `&[u8]`, `&str`, `&mut [u8]` and `u32` are each a `(ptr, len)` pair
+/// of `i32`s. So `check_id` is six `i32`s from three declared parameters, `seq: u32`
+/// being four bytes in guest memory rather than a scalar; and `trace` is the one
+/// function with no result, which `only_trace_answers_the_guest_nothing` covers for
+/// all 61.
+///
+/// **What no table of types can pin**: `le_arr_len`'s two `i32` scalars give the same
+/// `[I32; 2]` that `ldgr_index` gets from one region. A declaration whose parameters
+/// are in the wrong *order* is therefore invisible here, and to every signature check
+/// — only generating the wire from the declaration closes that.
 ///
 /// `ALL` is in declaration order, so comparing the whole vec pins the order and the
 /// membership too.
 #[test]
 fn the_spec_table_matches_the_declarations() {
-    let table: Vec<(&str, u64)> = HostFunctionSpec::ALL
+    use WasmValType::{I32, I64};
+
+    const EXPECTED: [(&str, u64, &[WasmValType]); 61] = [
+        ("ldgr_index", 60, &[I32; 2]),
+        ("parent_ldgr_time", 60, &[I32; 2]),
+        ("parent_ldgr_hash", 60, &[I32; 2]),
+        ("base_fee", 60, &[I32; 2]),
+        ("amendment_enabled", 100, &[I32; 2]),
+        ("cache_le", 5000, &[I32; 3]),
+        ("tx_field", 70, &[I32; 3]),
+        ("home_le_field", 70, &[I32; 3]),
+        ("le_field", 70, &[I32; 4]),
+        ("tx_inner", 110, &[I32; 4]),
+        ("home_le_inner", 110, &[I32; 4]),
+        ("le_inner", 110, &[I32; 5]),
+        ("tx_arr_len", 40, &[I32; 1]),
+        ("home_le_arr_len", 40, &[I32; 1]),
+        ("le_arr_len", 40, &[I32; 2]),
+        ("tx_inner_arr_len", 70, &[I32; 2]),
+        ("home_le_inner_arr_len", 70, &[I32; 2]),
+        ("le_inner_arr_len", 70, &[I32; 3]),
+        ("check_sig", 300, &[I32; 6]),
+        ("accountroot_id", 350, &[I32; 4]),
+        ("amm_id", 450, &[I32; 6]),
+        ("check_id", 350, &[I32; 6]),
+        ("credential_id", 350, &[I32; 8]),
+        ("delegate_id", 350, &[I32; 6]),
+        ("deposit_preauth_id", 350, &[I32; 6]),
+        ("did_id", 350, &[I32; 4]),
+        ("escrow_id", 350, &[I32; 6]),
+        ("trustline_id", 400, &[I32; 8]),
+        ("mpt_issuance_id", 350, &[I32; 6]),
+        ("mptoken_id", 500, &[I32; 6]),
+        ("nft_offer_id", 350, &[I32; 6]),
+        ("offer_id", 350, &[I32; 6]),
+        ("oracle_id", 350, &[I32; 6]),
+        ("paychan_id", 350, &[I32; 8]),
+        ("permissioned_domain_id", 350, &[I32; 6]),
+        ("signers_id", 350, &[I32; 4]),
+        ("ticket_id", 350, &[I32; 6]),
+        ("vault_id", 350, &[I32; 6]),
+        ("sha512_half", 2000, &[I32; 4]),
+        ("trace", 30, &[I32; 5]),
+        ("set_data", 1000, &[I32; 2]),
+        ("nft_uri", 5000, &[I32; 6]),
+        ("nft_issuer", 70, &[I32; 4]),
+        ("nft_taxon", 60, &[I32; 4]),
+        ("nft_flags", 60, &[I32; 2]),
+        ("nft_xfer_fee", 60, &[I32; 2]),
+        ("nft_serial", 60, &[I32; 4]),
+        // The two `i64`s on the whole wire, both from a declaration spelling one.
+        ("float_from_int", 100, &[I64, I32, I32, I32]),
+        ("float_from_uint", 130, &[I32; 5]),
+        ("float_from_stamount", 150, &[I32; 5]),
+        ("float_from_stnumber", 150, &[I32; 5]),
+        ("float_to_int", 130, &[I32; 5]),
+        // The only function with two out regions.
+        ("float_to_mant_exp", 130, &[I32; 6]),
+        ("float_from_mant_exp", 100, &[I64, I32, I32, I32, I32]),
+        ("float_cmp", 80, &[I32; 4]),
+        ("float_add", 160, &[I32; 7]),
+        ("float_sub", 160, &[I32; 7]),
+        ("float_mult", 300, &[I32; 7]),
+        ("float_div", 300, &[I32; 7]),
+        ("float_root", 5500, &[I32; 6]),
+        ("float_pow", 5500, &[I32; 6]),
+    ];
+
+    let table: Vec<(&str, u64, &[WasmValType])> = HostFunctionSpec::ALL
         .iter()
-        .map(|function| (function.wasm_name(), function.gas()))
+        .map(|function| (function.wasm_name(), function.gas(), function.wasm_params()))
         .collect();
 
+    // Row by row, and the count first: comparing the two vecs whole would print 61
+    // rows twice and leave the reader to find the difference. Each row carries its
+    // own name, so a failure identifies itself.
     assert_eq!(
-        table,
-        [
-            ("ldgr_index", 60),
-            ("parent_ldgr_time", 60),
-            ("parent_ldgr_hash", 60),
-            ("base_fee", 60),
-            ("amendment_enabled", 100),
-            ("cache_le", 5000),
-            ("tx_field", 70),
-            ("home_le_field", 70),
-            ("le_field", 70),
-            ("tx_inner", 110),
-            ("home_le_inner", 110),
-            ("le_inner", 110),
-            ("tx_arr_len", 40),
-            ("home_le_arr_len", 40),
-            ("le_arr_len", 40),
-            ("tx_inner_arr_len", 70),
-            ("home_le_inner_arr_len", 70),
-            ("le_inner_arr_len", 70),
-            ("check_sig", 300),
-            ("accountroot_id", 350),
-            ("amm_id", 450),
-            ("check_id", 350),
-            ("credential_id", 350),
-            ("delegate_id", 350),
-            ("deposit_preauth_id", 350),
-            ("did_id", 350),
-            ("escrow_id", 350),
-            ("trustline_id", 400),
-            ("mpt_issuance_id", 350),
-            ("mptoken_id", 500),
-            ("nft_offer_id", 350),
-            ("offer_id", 350),
-            ("oracle_id", 350),
-            ("paychan_id", 350),
-            ("permissioned_domain_id", 350),
-            ("signers_id", 350),
-            ("ticket_id", 350),
-            ("vault_id", 350),
-            ("sha512_half", 2000),
-            ("trace", 30),
-            ("set_data", 1000),
-            ("nft_uri", 5000),
-            ("nft_issuer", 70),
-            ("nft_taxon", 60),
-            ("nft_flags", 60),
-            ("nft_xfer_fee", 60),
-            ("nft_serial", 60),
-            ("float_from_int", 100),
-            ("float_from_uint", 130),
-            ("float_from_stamount", 150),
-            ("float_from_stnumber", 150),
-            ("float_to_int", 130),
-            ("float_to_mant_exp", 130),
-            ("float_from_mant_exp", 100),
-            ("float_cmp", 80),
-            ("float_add", 160),
-            ("float_sub", 160),
-            ("float_mult", 300),
-            ("float_div", 300),
-            ("float_root", 5500),
-            ("float_pow", 5500),
-        ]
+        table.len(),
+        EXPECTED.len(),
+        "the ABI gained or lost a declaration"
     );
+    for (row, expected) in table.iter().zip(EXPECTED) {
+        assert_eq!(*row, expected);
+    }
+}
+
+/// A host declared `HostResult<()>` leaves its wasm function with no result at all,
+/// and `trace` is the only one — every other function answers with one `i32`,
+/// whether that is a length, a value or a status.
+#[test]
+fn only_trace_answers_the_guest_nothing() {
+    for &function in HostFunctionSpec::ALL {
+        let expected = match function {
+            HostFunctionSpec::Trace => None,
+            _ => Some(WasmValType::I32),
+        };
+        assert_eq!(function.wasm_result(), expected, "{}", function.wasm_name());
+    }
 }
 
 /// The other half of the wire vocabulary, and the same change-detector argument: the
@@ -992,15 +1032,19 @@ fn every_variant_appears_in_all_exactly_once() {
     assert_eq!(names.len(), HostFunctionSpec::ALL.len());
 }
 
-/// Both accessors are `const`, so an engine can build its import and gas tables at
-/// compile time rather than on every invocation. The assertions sit in `const`
-/// blocks so they are checked while compiling, which is the claim; the values
+/// Every accessor is `const`, so an engine can build its import, gas and signature
+/// tables at compile time rather than on every invocation. The assertions sit in
+/// `const` blocks so they are checked while compiling, which is the claim; the values
 /// themselves are pinned above.
 #[test]
 fn the_table_is_usable_in_const_context() {
     const NAME: &str = HostFunctionSpec::Trace.wasm_name();
     const GAS: u64 = HostFunctionSpec::Trace.gas();
+    const PARAMS: &[WasmValType] = HostFunctionSpec::Trace.wasm_params();
+    const RESULT: Option<WasmValType> = HostFunctionSpec::Trace.wasm_result();
 
     const { assert!(!NAME.is_empty()) };
     const { assert!(GAS > 0) };
+    const { assert!(PARAMS.len() == 5) };
+    const { assert!(RESULT.is_none()) };
 }

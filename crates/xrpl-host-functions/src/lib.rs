@@ -4,10 +4,11 @@
 //! [`HostFunctions`] trait a host implements and the [`HostFunctionSpec`] table a
 //! wasm engine registers from.
 //!
-//! The split: hand-written here is the vocabulary the declarations are written in —
-//! [`HostError`], [`TraceDataType`], [`HostResult`], [`HASH_LEN`] — and everything
-//! derived from the declarations is generated. The expansion names nothing this file
-//! does not, so the two sides meet only in the block below.
+//! The split: hand-written here is the vocabulary — the types the declarations are
+//! written in ([`HostError`], [`TraceDataType`], [`HostResult`], [`HASH_LEN`]), the
+//! [`WasmValType`] the generated signature table is spelled in, and [`HOST_MODULE`] —
+//! and everything derived from the declarations is generated. The expansion names
+//! nothing this file does not, so the two sides meet only in the block below.
 //!
 //! So this file is lists — error codes, trace data types, functions. The `macro_rules!`
 //! that expand the first two into enums live in `macros.rs`.
@@ -51,6 +52,27 @@ pub type HostResult<T> = Result<T, HostError>;
 
 /// A `sha512Half` digest: the first 32 bytes of a SHA-512, as XRPL uses it.
 pub const HASH_LEN: usize = 32;
+
+/// The module name every host function is imported from:
+/// `(import "host_lib" "ldgr_index" …)`, as the guest SDK and this fork's fixtures
+/// spell it.
+///
+/// ABI data, so both sides read it here: a wasm engine registers under it and a
+/// screening pass refuses an import that names anything else.
+pub const HOST_MODULE: &str = "host_lib";
+
+/// A wasm value type, which is what [`HostFunctionSpec::wasm_params`] and
+/// [`HostFunctionSpec::wasm_result`] report a signature in.
+///
+/// Two variants because those are the two this ABI crosses on. Every byte parameter
+/// is a pair of `i32`s and every result is an `i32`, so an `i64` appears only where a
+/// declaration spells one. A third variant would be a change to the ABI rather than
+/// to this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WasmValType {
+    I32,
+    I64,
+}
 
 trace_data_types! {
     /// 8 little-endian bytes, rendered as a signed decimal.

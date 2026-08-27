@@ -5,7 +5,8 @@
 //! what a guest imports — is that mapping read differently, so a type this module
 //! does not know is rejected at the declaration rather than mishandled downstream.
 
-use quote::ToTokens;
+use proc_macro2::TokenStream;
+use quote::{ToTokens, quote};
 use syn::{FnArg, Ident, Pat, PatType, Type, TypePath, TypeReference, TypeSlice};
 
 /// The declared type of `trace`'s `data_type`, matched by name because the ABI
@@ -47,15 +48,19 @@ pub(crate) enum Encoding {
 }
 
 impl Encoding {
-    /// How many wasm parameters this encoding occupies: a region is a pair,
-    /// everything else is one.
-    // Read by the tests that pin the mapping; the library validates declarations
-    // through `param`, which does not need the count.
-    #[allow(dead_code)]
-    pub(crate) fn wasm_param_count(self) -> usize {
+    /// The wasm value types this encoding occupies — a region is a `(ptr, len)` pair,
+    /// everything else is one value — as tokens naming the ABI crate's
+    /// `WasmValType`.
+    ///
+    /// Tokens rather than a value of that type: a proc-macro crate exports nothing
+    /// but its macros, so the type the generated table is made of is one this crate
+    /// cannot import and can only spell. It resolves at the expansion site, as
+    /// `HostResult` in the declarations already does.
+    pub(crate) fn wasm_types(self) -> Vec<TokenStream> {
         match self {
-            Encoding::Region(_) => 2,
-            Encoding::I32 | Encoding::I64 | Encoding::TraceType => 1,
+            Encoding::I64 => vec![quote!(WasmValType::I64)],
+            Encoding::I32 | Encoding::TraceType => vec![quote!(WasmValType::I32)],
+            Encoding::Region(_) => vec![quote!(WasmValType::I32); 2],
         }
     }
 }
@@ -81,19 +86,31 @@ pub(crate) enum HostReturn {
     Nothing,
 }
 
-/// A wasm function's result list, which this ABI only ever leaves empty or fills
-/// with one `i32`.
+/// What the wasm function answers with — the wire side of [`HostReturn`], and all
+/// this ABI ever puts there: one `i32`, or nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Results {
+pub(crate) enum WasmResult {
     I32,
-    Empty,
+    Nothing,
 }
 
-impl From<HostReturn> for Results {
+impl From<HostReturn> for WasmResult {
     fn from(host_return: HostReturn) -> Self {
         match host_return {
-            HostReturn::BufferLength | HostReturn::Value => Results::I32,
-            HostReturn::Nothing => Results::Empty,
+            HostReturn::BufferLength | HostReturn::Value => WasmResult::I32,
+            HostReturn::Nothing => WasmResult::Nothing,
+        }
+    }
+}
+
+impl WasmResult {
+    /// The result as tokens, in the spelling [`Encoding::wasm_types`] uses. An
+    /// `Option`, because that is the shape the generated table holds: a wasm function
+    /// may have several results, and no declaration in this ABI has more than one.
+    pub(crate) fn wasm_type(self) -> TokenStream {
+        match self {
+            WasmResult::I32 => quote!(Some(WasmValType::I32)),
+            WasmResult::Nothing => quote!(None),
         }
     }
 }
@@ -297,14 +314,46 @@ mod tests {
         assert_eq!(read(parse_quote!(mut seq: u32)).unwrap().ident, "seq");
     }
 
+    /// The types one encoding occupies, as the emitted table spells them.
+    fn wasm_types(encoding: Encoding) -> Vec<String> {
+        encoding
+            .wasm_types()
+            .iter()
+            .map(TokenStream::to_string)
+            .collect()
+    }
+
     #[test]
     fn a_region_counts_as_two_wasm_parameters_and_a_scalar_as_one() {
-        assert_eq!(Encoding::Region(Region::InBytes).wasm_param_count(), 2);
-        assert_eq!(Encoding::Region(Region::OutBytes).wasm_param_count(), 2);
-        assert_eq!(Encoding::Region(Region::InU32).wasm_param_count(), 2);
-        assert_eq!(Encoding::I32.wasm_param_count(), 1);
-        assert_eq!(Encoding::I64.wasm_param_count(), 1);
-        assert_eq!(Encoding::TraceType.wasm_param_count(), 1);
+        for region in [
+            Region::InBytes,
+            Region::OutBytes,
+            Region::InU32,
+            Region::InStr,
+        ] {
+            assert_eq!(
+                Encoding::Region(region).wasm_types().len(),
+                2,
+                "{region:?} is a (ptr, len) pair"
+            );
+        }
+        for scalar in [Encoding::I32, Encoding::I64, Encoding::TraceType] {
+            assert_eq!(scalar.wasm_types().len(), 1, "{scalar:?} is one value");
+        }
+    }
+
+    /// The one place the ABI's two wasm value types are told apart: every region and
+    /// every scalar but `i64` crosses as an `i32`.
+    #[test]
+    fn only_an_i64_parameter_crosses_as_an_i64() {
+        assert_eq!(wasm_types(Encoding::I64), ["WasmValType :: I64"]);
+
+        assert_eq!(wasm_types(Encoding::I32), ["WasmValType :: I32"]);
+        assert_eq!(wasm_types(Encoding::TraceType), ["WasmValType :: I32"]);
+        assert_eq!(
+            wasm_types(Encoding::Region(Region::InBytes)),
+            ["WasmValType :: I32", "WasmValType :: I32"]
+        );
     }
 
     /// The check the ABI had none of: a type outside the table is a mistake at the
@@ -358,9 +407,17 @@ mod tests {
 
     #[test]
     fn a_host_that_returns_nothing_has_no_wasm_result() {
-        assert_eq!(Results::from(HostReturn::BufferLength), Results::I32);
-        assert_eq!(Results::from(HostReturn::Value), Results::I32);
-        assert_eq!(Results::from(HostReturn::Nothing), Results::Empty);
+        assert_eq!(WasmResult::from(HostReturn::BufferLength), WasmResult::I32);
+        assert_eq!(WasmResult::from(HostReturn::Value), WasmResult::I32);
+        assert_eq!(WasmResult::from(HostReturn::Nothing), WasmResult::Nothing);
+
+        // And what that classification emits: an `Option`, because a wasm function
+        // in this ABI answers with one value or with none.
+        assert_eq!(
+            WasmResult::I32.wasm_type().to_string(),
+            "Some (WasmValType :: I32)"
+        );
+        assert_eq!(WasmResult::Nothing.wasm_type().to_string(), "None");
     }
 
     #[test]

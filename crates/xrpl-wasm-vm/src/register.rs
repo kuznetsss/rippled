@@ -5,11 +5,7 @@ use crate::abi::{
 use crate::region::Region;
 use crate::vm::VmState;
 use wasmi::{Caller, Linker};
-use xrpl_host_functions::{HostError, HostFunctionSpec, TraceDataType};
-
-/// The module name the guest imports under (`(import "host_lib" "ldgr_index" …)`),
-/// as the guest SDK and this fork's fixtures spell it.
-pub(crate) const HOST_MODULE: &str = "host_lib";
+use xrpl_host_functions::{HOST_MODULE, HostError, HostFunctionSpec, TraceDataType};
 
 /// Register the host functions on `linker`, one per [`HostFunctionSpec`] variant.
 ///

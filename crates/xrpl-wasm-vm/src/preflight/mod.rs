@@ -18,11 +18,12 @@
 //! [`check_exported_resources`] is one pass — see it for what stays invisible, and
 //! why the table case leaves much more of it there.
 
+mod signature;
+
 use std::fmt;
 use wasmi::{ExternType, FuncType, Module, ValType};
-use xrpl_host_functions::HostFunctionSpec;
+use xrpl_host_functions::{HOST_MODULE, HostFunctionSpec};
 
-use crate::register::HOST_MODULE;
 use crate::vm::{MAX_MEMORY_PAGES, MAX_TABLE_ELEMENTS, compile};
 
 /// Why a module cannot be run. One variant per stage, since the caller maps the
@@ -32,8 +33,8 @@ pub enum CheckError {
     /// `wasm` is not a valid module under this engine's configuration.
     Compile(String),
     /// An import no engine of this ABI defines: another module namespace, a name
-    /// that is not a host function, or one imported as something other than a
-    /// function.
+    /// that is not a host function, one imported as something other than a
+    /// function, or one imported with a signature the ABI does not give it.
     Import(String),
     /// No export named `function_name` with signature `() -> i32`.
     EntryPoint(String),
@@ -81,30 +82,41 @@ fn check_imports(module: &Module) -> Result<(), CheckError> {
     Ok(())
 }
 
-/// Whether the engine defines this one import.
+/// Whether the engine defines this one import, under this name **and this type**.
 ///
 /// The set of names is [`HostFunctionSpec::ALL`], which is also what
 /// [`crate::register::register_host_functions`] iterates — so a check and a run
 /// cannot disagree about which names exist, and adding a host function extends
-/// both at once. The one thing this does not compare is `ty`'s *signature*, which
-/// still parts a module from the engine at instantiation; the kind is compared
-/// because the engine defines these names as functions and as nothing else.
+/// both at once. The signature comes from the same table
+/// ([`HostFunctionSpec::wasm_params`]), which is derived from the declaration, so
+/// what is compared here is the guest's spelling against the ABI's own — not
+/// against whatever the engine happened to register.
 ///
 /// The rules are ordered, not merely alternatives: a guest importing `env::malloc`
 /// is told about the namespace rather than that `malloc` is not a host function,
 /// because the namespace is the one that explains every other import it has too.
+/// The signature is last for the same reason — it is the narrowest fault, and the
+/// only one that presumes the name was right.
 fn check_import(module: &str, name: &str, ty: &ExternType) -> Result<(), String> {
     if module != HOST_MODULE {
         return Err(format!("'{module}::{name}' is not from '{HOST_MODULE}'"));
     }
-    if !HostFunctionSpec::ALL
+    let Some(function) = HostFunctionSpec::ALL
         .iter()
-        .any(|op| op.wasm_name() == name)
-    {
+        .find(|op| op.wasm_name() == name)
+        .copied()
+    else {
         return Err(format!("no host function '{name}'"));
-    }
-    if !matches!(ty, ExternType::Func(_)) {
+    };
+    // The engine defines these names as functions and as nothing else.
+    let ExternType::Func(ty) = ty else {
         return Err(format!("'{HOST_MODULE}::{name}' is not a function"));
+    };
+    if !signature::matches(ty, function) {
+        return Err(format!(
+            "'{HOST_MODULE}::{name}' {}",
+            signature::fault(ty, function)
+        ));
     }
     Ok(())
 }
@@ -206,12 +218,18 @@ pub(crate) fn entry_point_fault(found: Option<ExternType>, name: &str) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signature::declared_func_type;
     use wasmi::{GlobalType, MemoryType, Mutability};
 
-    /// A host function as a guest declares it. Any function type will do: the
-    /// signature is not what [`check_import`] compares.
+    /// A function type, of no particular shape. For the tests whose import breaks a
+    /// rule that outranks the signature, so its signature is never reached.
     fn a_function() -> ExternType {
         ExternType::Func(FuncType::new([ValType::I32], [ValType::I32]))
+    }
+
+    /// The import a guest must write for `function`, built from the ABI's own table.
+    fn declared(function: HostFunctionSpec) -> ExternType {
+        ExternType::Func(declared_func_type(function))
     }
 
     /// A name every one of these tests can use, taken from the ABI rather than
@@ -220,22 +238,115 @@ mod tests {
         HostFunctionSpec::ALL[0].wasm_name()
     }
 
+    /// The refusal `check_import` gives an import it will not serve.
+    fn refusal(name: &str, ty: &ExternType) -> String {
+        check_import(HOST_MODULE, name, ty).expect_err(name)
+    }
+
     // -----------------------------------------------------------------------
     // Imports
     // -----------------------------------------------------------------------
 
-    /// Every name the ABI declares is served. Derived from `ALL` rather than
-    /// listed, so a host function added to the ABI is covered the day it lands.
+    /// Every name the ABI declares is served, with the type the ABI gives it.
+    /// Derived from `ALL` rather than listed, so a host function added to the ABI is
+    /// covered the day it lands.
+    ///
+    /// Both sides of this come from the same table, so what it pins is only that
+    /// there *is* an accepting path for all 61 — that no rule refuses a function the
+    /// ABI declares. `tests/preflight.rs` is where the table meets something else:
+    /// the engine, in `a_module_importing_every_host_function_runs`, and a
+    /// hand-written spelling of the wire, in
+    /// `every_declared_host_function_may_be_imported`.
     #[test]
     fn every_declared_host_function_is_served() {
-        for op in HostFunctionSpec::ALL {
+        for &op in HostFunctionSpec::ALL {
             assert_eq!(
-                check_import(HOST_MODULE, op.wasm_name(), &a_function()),
+                check_import(HOST_MODULE, op.wasm_name(), &declared(op)),
                 Ok(()),
                 "{}",
                 op.wasm_name()
             );
         }
+    }
+
+    /// An import of the right name with the wrong number of parameters — the fault
+    /// that used to reach instantiation, since a name alone is what linking resolves.
+    #[test]
+    fn an_import_with_the_wrong_arity_is_refused() {
+        let function = HostFunctionSpec::ALL[0];
+        let one_short = ExternType::Func(FuncType::new([], [ValType::I32]));
+
+        let refusal = refusal(function.wasm_name(), &one_short);
+        assert!(refusal.contains("has the wrong signature"), "{refusal}");
+        // Both shapes, so a contract author can see the difference rather than
+        // being told only that there is one.
+        assert!(
+            refusal.contains("expected '(i32, i32) -> i32'"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("found '() -> i32'"), "{refusal}");
+    }
+
+    /// The right arity carrying the wrong type. An `f64` cannot reach here through a
+    /// real module — the engine disables floats, so such a module is refused at the
+    /// compile stage — which is why the rule is exercised on a type built directly.
+    #[test]
+    fn an_import_with_the_wrong_parameter_type_is_refused() {
+        let function = HostFunctionSpec::ALL[0];
+        let mistyped =
+            ExternType::Func(FuncType::new([ValType::I32, ValType::F64], [ValType::I32]));
+
+        let refusal = refusal(function.wasm_name(), &mistyped);
+        assert!(refusal.contains("found '(i32, f64) -> i32'"), "{refusal}");
+    }
+
+    /// `trace` answers the guest nothing, so an import expecting a result from it is
+    /// refused — and the refusal says `-> ()`, not that the result list is empty.
+    #[test]
+    fn an_import_expecting_a_result_the_abi_does_not_give_is_refused() {
+        let trace = HostFunctionSpec::Trace;
+        let declared = declared_func_type(trace);
+        let with_a_result =
+            ExternType::Func(FuncType::new(declared.params().to_vec(), [ValType::I32]));
+
+        let refusal = refusal(trace.wasm_name(), &with_a_result);
+        assert!(
+            refusal.contains("expected '(i32, i32, i32, i32, i32) -> ()'"),
+            "{refusal}"
+        );
+        assert!(
+            refusal.contains("found '(i32, i32, i32, i32, i32) -> i32'"),
+            "{refusal}"
+        );
+    }
+
+    /// The converse: a guest that drops the result of a function that has one would
+    /// read the stack wrong, so it is refused too.
+    #[test]
+    fn an_import_missing_its_result_is_refused() {
+        let function = HostFunctionSpec::ALL[0];
+        let declared = declared_func_type(function);
+        let without = ExternType::Func(FuncType::new(declared.params().to_vec(), []));
+
+        let refusal = refusal(function.wasm_name(), &without);
+        assert!(refusal.contains("found '(i32, i32) -> ()'"), "{refusal}");
+    }
+
+    /// A result of the right *count* and the wrong type — the third way a result can
+    /// be wrong, and the one the two tests above cannot see, since both differ from
+    /// the declaration in how many results there are.
+    #[test]
+    fn an_import_whose_result_is_the_wrong_type_is_refused() {
+        let function = HostFunctionSpec::ALL[0];
+        let declared = declared_func_type(function);
+        let widened = ExternType::Func(FuncType::new(declared.params().to_vec(), [ValType::I64]));
+
+        let refusal = refusal(function.wasm_name(), &widened);
+        assert!(
+            refusal.contains("expected '(i32, i32) -> i32'"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("found '(i32, i32) -> i64'"), "{refusal}");
     }
 
     #[test]
@@ -284,6 +395,16 @@ mod tests {
             !refusal.contains("no host function"),
             "the namespace explains it: {refusal}"
         );
+    }
+
+    /// The signature is the last rule, and the narrowest: it presumes the name was
+    /// right. An import that is wrong about both is told about the name, since there
+    /// is no signature the ABI could have expected for a function it does not have.
+    #[test]
+    fn the_name_is_reported_before_the_signature() {
+        let refusal = refusal("no_such_function", &a_function());
+
+        assert_eq!(refusal, "no host function 'no_such_function'");
     }
 
     /// Both halves of the type are load-bearing, and neither is checked anywhere

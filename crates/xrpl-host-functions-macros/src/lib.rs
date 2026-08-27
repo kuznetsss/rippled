@@ -34,19 +34,22 @@ use parsed_host_function::ParsedHostFunction;
 ///   mention it.
 /// - `pub enum HostFunctionSpec`: one variant per declaration, named by
 ///   PascalCasing the function name (`get_ledger_sqn` becomes `GetLedgerSqn`) and
-///   carrying that declaration's doc comment. Its `const fn wasm_name` and
-///   `const fn gas` are the ABI metadata, and `ALL` is every variant in
-///   declaration order — what a wasm engine iterates to build its import table.
+///   carrying that declaration's doc comment. Its `const fn wasm_name`,
+///   `const fn gas`, `const fn wasm_params` and `const fn wasm_result` are the ABI
+///   metadata, and `ALL` is every variant in declaration order — what a wasm engine
+///   iterates to build its import table.
 /// - `struct HostFnSpec`: private, one row of that metadata table. It exists only
-///   so `wasm_name` and `gas` read from a single `match` over the declarations,
-///   and never appears in a signature a caller can name.
+///   so those four accessors read from a single `match` over the declarations, and
+///   never appears in a signature a caller can name.
 ///
-/// The expansion introduces no other name and reaches for none: the only paths in
-/// it are `Self::Variant` and whatever the declarations themselves spell. So the
-/// block compiles wherever the types it names — `HostResult` above — resolve.
+/// The expansion reaches for nothing of its own: the only paths in it are
+/// `Self::Variant`, `WasmValType::…` and whatever the declarations themselves
+/// spell. So the block compiles wherever the types it names resolve — `HostResult`
+/// in the declarations below, and `WasmValType`, which the ABI crate hand-writes
+/// because a proc-macro crate cannot export a type.
 ///
 /// ```
-/// use xrpl_host_functions::HostResult;
+/// use xrpl_host_functions::{HostResult, WasmValType};
 /// use xrpl_host_functions_macros::host_functions;
 ///
 /// host_functions! {
@@ -73,6 +76,15 @@ use parsed_host_function::ParsedHostFunction;
 /// assert_eq!(TRACE_GAS, 500);
 ///
 /// assert_eq!(HostFunctionSpec::GetLedgerSqn.wasm_name(), "ldgr_index");
+///
+/// // The wasm signature is derived, not declared: `out: &mut [u8]` is the
+/// // `(ptr, len)` pair a guest passes, and a host returning nothing leaves the
+/// // wasm function with no result.
+/// use WasmValType::{I32, I64};
+/// assert_eq!(HostFunctionSpec::GetLedgerSqn.wasm_params(), &[I32, I32]);
+/// assert_eq!(HostFunctionSpec::GetLedgerSqn.wasm_result(), Some(I32));
+/// assert_eq!(HostFunctionSpec::TraceNum.wasm_params(), &[I32, I32, I64]);
+/// assert_eq!(HostFunctionSpec::TraceNum.wasm_result(), None);
 /// assert_eq!(
 ///     HostFunctionSpec::ALL,
 ///     &[HostFunctionSpec::GetLedgerSqn, HostFunctionSpec::TraceNum],
@@ -198,14 +210,16 @@ fn generate(functions: &[ParsedHostFunction]) -> TokenStream {
             #(#trait_methods)*
         }
 
-        /// One row of the ABI table: what [`HostFunctionSpec::wasm_name`] and
-        /// [`HostFunctionSpec::gas`] read from.
+        /// One row of the ABI table: everything [`HostFunctionSpec`]'s accessors
+        /// read from.
         ///
-        /// Private, and the only reason it exists is to keep both of them fed
+        /// Private, and the only reason it exists is to keep all four of them fed
         /// from a single `match` over the declarations.
         struct HostFnSpec {
             name: &'static str,
             gas: u64,
+            params: &'static [WasmValType],
+            result: Option<WasmValType>,
         }
 
         /// Identifies one host function, and is the compile-time source of its
@@ -250,6 +264,33 @@ fn generate(functions: &[ParsedHostFunction]) -> TokenStream {
             /// gas tables can be built at compile time.
             pub const fn gas(self) -> u64 {
                 self.spec().gas
+            }
+
+            /// The wasm parameters a guest imports this function with, in order.
+            ///
+            /// The declared parameters as the guest sees them: `i32` and `i64` cross
+            /// as themselves, and every other declared type is a `(ptr, len)` pair
+            /// of `i32`s. So this is **longer than the declaration's own list
+            /// wherever a parameter is marshalled**, and the same length only for a
+            /// function whose parameters are all scalars. Declaration order is wasm
+            /// parameter order.
+            ///
+            /// This and [`Self::wasm_result`] are the whole signature an import must
+            /// carry, and a module importing the name with any other is refused
+            /// before it runs.
+            pub const fn wasm_params(self) -> &'static [WasmValType] {
+                self.spec().params
+            }
+
+            /// The one value this function answers with, or `None` for a function
+            /// declared `HostResult<()>`, whose guest learns neither success nor
+            /// failure.
+            ///
+            /// An `Option` rather than a list, though a wasm function may have
+            /// several results: **no declaration in this ABI has more than one**, so
+            /// a second would be an ABI change and not a wider return type here.
+            pub const fn wasm_result(self) -> Option<WasmValType> {
+                self.spec().result
             }
         }
     }
@@ -372,18 +413,21 @@ mod tests {
             "pub enum HostFunctionSpec { GetLedgerSqn , TraceNum , }",
             "pub const ALL : & 'static [Self] = & [Self :: GetLedgerSqn , Self :: TraceNum ,]",
             // The table's row type is generated too, and stays private.
-            "struct HostFnSpec { name : & 'static str , gas : u64 , }",
+            "struct HostFnSpec { name : & 'static str , gas : u64 , \
+             params : & 'static [WasmValType] , result : Option < WasmValType > , }",
             "const fn spec (self) -> HostFnSpec",
-            "Self :: GetLedgerSqn => HostFnSpec { name : \"ldgr_index\" , gas : 60u64 }",
             "pub const fn wasm_name (self) -> & 'static str",
             "pub const fn gas (self) -> u64",
+            "pub const fn wasm_params (self) -> & 'static [WasmValType]",
+            "pub const fn wasm_result (self) -> Option < WasmValType >",
         ] {
             assert!(generated.contains(expected), "missing {expected:?}");
         }
     }
 
-    /// The expansion stands alone: every name in it is either generated here or
-    /// written in the declarations, so it cannot depend on the crate it lands in.
+    /// The expansion stands alone: every name in it is either generated here, written
+    /// in the declarations, or vocabulary the ABI crate hand-writes, so it cannot
+    /// depend on the crate it lands in.
     #[test]
     fn names_no_crate_of_its_own() {
         let generated = expand(quote! {
@@ -396,13 +440,22 @@ mod tests {
 
         assert!(!generated.contains("xrpl_host_functions"), "{generated}");
 
-        // `Self::Variant` is the only path the expansion may build: anything else
-        // would reach out of the generated code. Doc comments spell paths without
-        // spaces (`Self::ALL`), so they do not match.
+        // Two roots, and no third: `Self::Variant` for what the expansion generates,
+        // and `WasmValType::…` because the signature table has to be made of a type,
+        // and a proc-macro crate cannot export one. Both resolve in the crate that
+        // declares the ABI. Doc comments spell paths without spaces (`Self::ALL`), so
+        // they do not match.
         for (index, _) in generated.match_indices(" :: ") {
+            // The whole identifier, not a suffix of one: `MyWasmValType` must not pass
+            // for `WasmValType`. Splitting on what cannot be in an identifier also
+            // drops the punctuation a token stream leaves attached (`& [WasmValType`).
+            let root = generated[..index]
+                .rsplit(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .expect("rsplit yields at least one piece");
             assert!(
-                generated[..index].ends_with("Self"),
-                "path out of the expansion at {index}: {generated}"
+                matches!(root, "Self" | "WasmValType"),
+                "path out of the expansion at {index}, rooted at `{root}`: {generated}"
             );
         }
     }
