@@ -22,6 +22,23 @@ mod preflight;
 mod register;
 mod vm;
 
+// ---------------------------------------------------------------------------
+// Throwaway: the benchmark in `bench.rs` and the three lines that give it what it
+// needs — the integration tests' host and module helpers, reached by the name
+// they know this crate as, since they were written to link against it.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+extern crate self as xrpl_wasm_vm;
+#[cfg(test)]
+mod bench;
+// The lints this crate denies reach further here than they did over `tests`, which
+// inherits no inner attribute of this file: the host's filler bytes are a
+// `usize as u8` this code has no reason to argue for.
+#[cfg(test)]
+#[allow(unreachable_pub, clippy::cast_possible_truncation)]
+#[path = "../tests/support/mod.rs"]
+mod support;
+
 pub use preflight::{CheckError, check};
 pub use vm::{
     MAX_FIELD_BYTES, MAX_MEMORY_BYTES, MAX_MEMORY_PAGES, MAX_TABLE_ELEMENTS, RunError, RunFailure,

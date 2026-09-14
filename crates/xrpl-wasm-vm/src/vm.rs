@@ -309,9 +309,11 @@ pub fn run<'h>(
     host: &'h dyn HostFunctions,
     function_name: &str,
 ) -> Result<RunOutcome, RunFailure> {
+    let mut watch = Stopwatch::start();
     let engine = wasm_engine();
     let module =
         compile(wasm).map_err(|detail| RunFailure::owing_nothing(RunError::Compile(detail)))?;
+    watch.mark("compile");
 
     let mut store = Store::new(
         engine,
@@ -328,10 +330,12 @@ pub fn run<'h>(
         .set_fuel(gas)
         .map_err(|_| RunFailure::owing_nothing(RunError::Internal))?;
     store.limiter(|state| &mut state.mem_limits);
+    watch.mark("store");
 
     let mut linker = Linker::<VmState<'h>>::new(engine);
     register_host_functions::<Bodies>(&mut linker)
         .map_err(|_| RunFailure::owing_nothing(RunError::Internal))?;
+    watch.mark("linker");
 
     let instance = match linker.instantiate_and_start(&mut store, &module) {
         Ok(instance) => instance,
@@ -341,6 +345,7 @@ pub fn run<'h>(
         }
     };
     store.data_mut().memory = instance.exports(&store).find_map(Export::into_memory);
+    watch.mark("instantiate");
 
     let function = match instance.get_typed_func::<(), i32>(&store, function_name) {
         Ok(function) => function,
@@ -353,6 +358,7 @@ pub fn run<'h>(
             return Err(failed(&store, gas, error));
         }
     };
+    watch.mark("entry point");
 
     let result = match function.call(&mut store, ()) {
         Ok(result) => result,
@@ -361,9 +367,71 @@ pub fn run<'h>(
             return Err(failed(&store, gas, error));
         }
     };
+    watch.mark("call");
 
     let fuel_used = fuel_used(&store, gas).map_err(RunFailure::owing_nothing)?;
+    watch.mark("fuel");
     Ok(RunOutcome { result, fuel_used })
+}
+
+use timing::Stopwatch;
+
+/// **Throwaway**, for [`crate::bench`]: times [`run`]'s stages from the inside, where
+/// the linker's share of a run is visible. Delete both halves with `bench.rs`.
+///
+/// Two definitions rather than a feature: outside a test build [`Stopwatch`] is a
+/// unit struct with empty methods, so a production `run` has no timing in it at all.
+#[cfg(test)]
+pub(crate) mod timing {
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    thread_local! {
+        /// The stages of the most recent `run` on this thread — `Stopwatch::start`
+        /// clears it, so what accumulates is bounded by one run's stage count.
+        static STAGES: RefCell<Vec<(&'static str, Duration)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) struct Stopwatch {
+        last: Instant,
+    }
+
+    impl Stopwatch {
+        pub(crate) fn start() -> Stopwatch {
+            STAGES.with_borrow_mut(Vec::clear);
+            Stopwatch {
+                last: Instant::now(),
+            }
+        }
+
+        /// Closes the stage that ends here and opens the next.
+        pub(crate) fn mark(&mut self, stage: &'static str) {
+            let now = Instant::now();
+            let elapsed = now - self.last;
+            self.last = now;
+            STAGES.with_borrow_mut(|stages| stages.push((stage, elapsed)));
+        }
+    }
+
+    /// The stages of the most recent `run`, in the order `run` marked them.
+    pub(crate) fn stages() -> Vec<(&'static str, Duration)> {
+        STAGES.with_borrow(Clone::clone)
+    }
+}
+
+#[cfg(not(test))]
+mod timing {
+    pub(crate) struct Stopwatch;
+
+    impl Stopwatch {
+        #[inline]
+        pub(crate) fn start() -> Stopwatch {
+            Stopwatch
+        }
+
+        #[inline]
+        pub(crate) fn mark(&mut self, _stage: &'static str) {}
+    }
 }
 
 #[cfg(test)]
